@@ -1,52 +1,54 @@
-% Model Predictive Path Integral Control (MPPI) for unicycle model
+% Model Predictive Path Integral Control (MPPI) for Cartpole model
 clear all; close all; clc;
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 % MPPI parameters
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-% Unicycle
-mppi.input_size = 2; % input size
-mppi.state_size = 3; % state size
+% Cartpole
+mppi.state_size = 4; % state size
+mppi.input_size = 1; % input size
 
 % Rollouts
-mppi.K = 100;        % number of rollouts
+mppi.K = 500;        % number of rollouts
 
 % Horizon Length
-mppi.dt = 0.05;      % time step
-mppi.N = 20;         % horizon
+mppi.dt = 0.01;      % time step
+mppi.N = 75;         % horizon
 
 % Cost
-mppi.lambda = .05;            % tuning weight factor
-mppi.mu = [0.0, 0.0];        % input mean     (Gaussian noise)
-mppi.sigma = [.2, 1.0];      % input variance (Gaussian noise)
-mppi.Q = diag([10,10,5]);    % state cost (for path integral)
-mppi.Qf = diag([30,30,20]);  % final state cost (for path integral)
-mppi.R = diag([1,.1]);       % state cost (for path integral)
+mppi.lambda = 0.01;         % tuning weight factor
+mppi.mu = [0.0];            % input mean     (Gaussian noise)
+mppi.sigma = [40.0];        % input variance (Gaussian noise)
+mppi.Q = diag([1,50,50,5]);  % state cost (for path integral)
+mppi.Qf = diag([0,0,0,0]); % final state cost (for path integral)
+mppi.R = diag([50]);         % state cost (for path integral)
 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Dyanmics parameters
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 % inital condition
-x0 = [0;  % y
-      0;  % z
-      0]; % theta
+x0 = [0;  % z
+      0;  % theta
+      0;  % zdot
+      0]; % thetadot
 
 % desired state
-x_des = [1;     % y
-         2;     % z
-         pi/4]; % theta
+x_des = [0;     % z
+         pi;  % theta
+         0;     % zdot
+         0];    % thetadot
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 % simulate
 t0 = 0;
-tf = 3.0;
+tf = 5.0;
 [t, x, u] = mppi_control(t0, tf, x0, x_des, mppi);
 
-% animate the solution to the unicycle
-fig1 = figure(1);
-xlim = [min(x(:, 1)) - 0.05, max(x(:, 1)) + 0.05];
-ylim = [min(x(:, 2)) - 0.05, max(x(:, 2)) + 0.05];
+% animate the cartpole
+figure(1);
 pause(1.0);
 tic;
 for i = 1:length(t)
@@ -56,29 +58,28 @@ for i = 1:length(t)
     end
 
     % draw the unicycle
-    draw_unicycle(t(i) , x(i, :), fig1, xlim, ylim);
+    draw_cartpole(t(i) , x(i, :))
 end
- 
-% plot the state data and trajectory
+
+% plot the state and input data
 figure(2);
-subplot(1,2,1); 
-plot(t, x(1:end, :));
+subplot(2,1,1);
+plot(t, x(1:end, :), 'LineWidth', 2);
 yline(x_des(1), 'b--', 'LineWidth', 2);
 yline(x_des(2), 'r--', 'LineWidth', 2);
 yline(x_des(3), 'y--', 'LineWidth', 2);
+yline(x_des(4), 'g--', 'LineWidth', 2);
 ylabel('State');
 xlabel('Time (s)');
-legend('y', 'z', 'theta');
+legend('$z$', '$\theta$', '$\dot{z}$', '$\dot{\theta}$', 'Interpreter', 'latex');
 grid on;
 
-subplot(1,2,2); hold on;
-plot(x(:, 1), x(:, 2), 'LineWidth', 2);
-plot(x0(1), x0(2), 'ro', 'MarkerSize', 10, 'LineWidth', 2);
-plot(x(end, 1), x(end, 2), 'rx', 'MarkerSize', 10, 'LineWidth', 2);
-plot(x_des(1), x_des(2), 'go', 'MarkerSize', 10, 'LineWidth', 2);
-xlabel('y');
-ylabel('z');
-axis equal; grid on;
+subplot(2,1,2);
+stairs(t, u(1:end, :), 'LineWidth', 2);
+ylabel('Input');
+xlabel('Time (s)');
+legend('$u$', 'Interpreter', 'latex');
+grid on;
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
@@ -88,7 +89,7 @@ function [t, x, u] = mppi_control(t0, tf, x0, x_des, mppi)
     % simulation time
     tspan = t0: mppi.dt : tf;
 
-    % forward simulate the unicycle with MPPI control
+    % forward simulate the dynamics with MPPI control
     x_curr = x0;
     x_list = zeros(length(tspan), mppi.state_size);
     u_list = zeros(length(tspan), mppi.input_size);
@@ -111,8 +112,8 @@ function [t, x, u] = mppi_control(t0, tf, x0, x_des, mppi)
         u_list(i, :) = u;
         x_list(i, :) = x_curr;
         
-        % forward simulate the unicycle for dt
-        [~, x_sim] = ode45(@(t, x) unicycle_dynamics_dt(t, x_curr, u), [0:mppi.dt:mppi.dt], x_curr);
+        % forward simulate the dynamics for dt
+        [~, x_sim] = ode45(@(t, x) dynamics_dt(t, x_curr, u), [0:mppi.dt:mppi.dt], x_curr);
 
         % update the state
         x_curr = x_sim(end, :);
@@ -222,8 +223,10 @@ function [t, x] = forward_sim(x0, du_list, mppi)
         % update the zero order hold control input
         u = du_list(i,:);
 
-        % forward simulate the unicycle for dt
-        [~, x_sim] = ode45(@(t, x) unicycle_dynamics_dt(t, x_curr, u), [0 : mppi.dt : mppi.dt], x_curr);
+        % forward simulate the dynamics for dt
+%         [~, x_sim] = ode45(@(t, x) dynamics_dt(t, x_curr, u), [0 : mppi.dt : mppi.dt], x_curr);
+        x_sim = x_curr + dynamics_dt(0, x_curr, u) * mppi.dt;
+        x_sim = x_sim';
 
         % update the state
         x_curr = x_sim(end, :);
@@ -237,19 +240,44 @@ function [t, x] = forward_sim(x0, du_list, mppi)
     x = x_list;      % size (N+1 x state_size)
 end
 
-% unicycle dynamics
-function xdot = unicycle_dynamics_dt(t, x, u)
-    
+% system dynamics
+function xdot = dynamics_dt(t, x, u)
+
+    % model parameters
+    mc = 1.0;  % cart mass
+    mp = 0.3;  % pole mass
+    l = 1.0;   % pole length
+    g = 9.81;  % gravity
+    bc = 0.0;  % cart damping
+    bp = 0.0;  % pole damping
+
     % unpack the state
-    theta = x(3);
+    th = x(2);
+    z_dot = x(3);
+    th_dot = x(4);
 
-    % input
-    v = u(1);
-    w = u(2);
+    % convert to configuration space
+    q_dot = [z_dot; th_dot];
 
-    % define the dynamics
-    g_x = [cos(theta), 0;
-           sin(theta), 0;
-           0,          1];
-    xdot = g_x * [v; w];
+    % Matrix info
+    D = [(mc+mp),      mp*l*cos(th); 
+         mp*l*cos(th), mp*(l^2)];
+    
+    C = [bc, -mp*l*th_dot*sin(th); 
+         0, bp];
+    
+    G = [0; 
+         mp*g*l*sin(th)];
+
+    B = [1; 
+         0];
+    
+    % set dynamics info
+    f_x = [q_dot;
+            -inv(D)*(C*q_dot + G)];
+    g_x = [zeros(2,1);
+            inv(D)*B];
+
+    % compute the dynamics
+    xdot = f_x + g_x * u;
 end
