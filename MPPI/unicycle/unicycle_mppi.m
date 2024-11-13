@@ -10,11 +10,11 @@ mppi.input_size = 2; % input size
 mppi.state_size = 3; % state size
 
 % Rollouts
-mppi.K = 100;        % number of rollouts
+mppi.K = 250;        % number of rollouts
 
 % Horizon Length
-mppi.dt = 0.05;      % time step
-mppi.N = 20;         % horizon
+mppi.dt = 0.04;      % time step
+mppi.N = 30;         % horizon
 
 % Cost
 mppi.lambda = .05;            % tuning weight factor
@@ -32,15 +32,15 @@ x0 = [0;  % y
       0]; % theta
 
 % desired state
-x_des = [1;     % y
-         2;     % z
-         pi/4]; % theta
+x_des = [5;     % y
+         3;      % z
+         pi/2];  % theta
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 % simulate
 t0 = 0;
-tf = 3.0;
+tf = 4.0;
 [t, x, u] = mppi_control(t0, tf, x0, x_des, mppi);
 
 % animate the solution to the unicycle
@@ -71,7 +71,17 @@ xlabel('Time (s)');
 legend('y', 'z', 'theta');
 grid on;
 
-subplot(1,2,2); hold on;
+subplot(1,2,2); 
+hold on;
+plot(t, u(:, 1));
+plot(t, u(:, 2));
+ylabel('Inputs');
+xlabel('Time (s)');
+legend('vel', 'omega');
+grid on;
+
+figure(3);
+hold on;
 plot(x(:, 1), x(:, 2), 'LineWidth', 2);
 plot(x0(1), x0(2), 'ro', 'MarkerSize', 10, 'LineWidth', 2);
 plot(x(end, 1), x(end, 2), 'rx', 'MarkerSize', 10, 'LineWidth', 2);
@@ -105,7 +115,8 @@ function [t, x, u] = mppi_control(t0, tf, x0, x_des, mppi)
 
         % compute the MPPI control input and take the first input
         u_mppi = monte_carlo(x_curr, x_des, u_nom, mppi);
-        u = u_mppi(1,:);
+        u = u_mppi(1,:);  % TODO: for this kinemaitc system, consider adding
+                          %       some kind of filter so to net get all the jumpiness coming from the noise. 
         
         % save the control input
         u_list(i, :) = u;
@@ -160,10 +171,11 @@ function u_mppi = monte_carlo(x0, x_des, u_nom, mppi)
     % compute the numerator from the sum
     num_sum = zeros(mppi.N, mppi.input_size);
     for k = 1:mppi.K
-        num_sum = num_sum + w_list(k) * u_list(:, :, k);
+        num_sum = num_sum + w_list(k) * u_list(:, :, k); % NOTE: u_list already has nominal control input in it
     end
     
-    u_mppi = num_sum / sum(w_list);
+    u_mppi = num_sum / sum(w_list); % NOTE: nominal control input is already in here, 
+                                    % no need to add it again, things will blow up
 end
 
 % compute the path integral
