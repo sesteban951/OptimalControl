@@ -5,14 +5,14 @@
 clear all; close all; clc;
 
 % initial parameters of the distribution (Gaussian)
-mu = -2;
-sigma2 = 75;
+mu = 4;
+sigma2 = 10;
 
 % optimization parameters
-max_iters = 100;  % max iterations
-N = 50;          % total number of samples
+max_iters = 25;  % max iterations
+N = 100;          % total number of samples
 N_elite = 10;     % number of elite samples
-epsilon = 0.001;   % stopping criteria
+epsilon = 1e-6;   % stopping criteria
 
 % do the optimization
 MU = [mu];
@@ -32,11 +32,12 @@ while (iter < max_iters) && (sigma2 > epsilon)
 
     % Sort the samples based on the objective function
     [~, idx] = sort(F, 'descend');  % biggest to smallest
+    X_sorted = X(idx);
 
     % Update the distribution parameters from elite samples
-    F_elite = F(idx(1:N_elite));
-    mu = mean(F_elite);
-    sigma2 = std(F_elite);
+    X_elite = X_sorted(1:N_elite);
+    mu = mean(X_elite);
+    sigma2 = var(X_elite);
 
     % store the results
     MU = [MU, mu];
@@ -49,6 +50,7 @@ end
 % display the results
 tot_time = toc;
 fprintf('Optimization finished in %d iterations and %.2f seconds\n', iter, tot_time);
+fprintf('The final mean is %.2f and the final variance is %.2f\n', mu, sigma2);
 
 figure;
 hold on; grid on;
@@ -86,11 +88,16 @@ for i = 1:length(MU)
     end
 end
 
-
 % define some arbitrary objectoive function
 function S = obj_func(x)
     p = 8.2;
     S = exp(-(x-2)^2) + p * exp(-(x+2)^2);
+    % a = 1.4;
+    % b = 3.9;
+    % c = 2.5;
+    % d = 0;
+    % e = 0.8;
+    % S = a*x^4 + b*x^3 + c*x^2 + d*x + e;
 end
 
 % function to evaluat the normal distribution
