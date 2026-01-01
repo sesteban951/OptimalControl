@@ -8,11 +8,11 @@ clear; clc; close all;
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 %desired states
-x_des = [pi/2; 0];
+x_des = [pi; 0];
 
 % simulation parameters
-tf = 3;
-dt = 0.05;
+tf = 8.0;
+dt = 0.04;
 tspan = 0:dt:tf;
 N = numel(tspan) - 1;
 
@@ -21,15 +21,17 @@ x1_min = -pi; % theta min
 x1_max =  pi; % theta max
 x2_min = -10;  % theta_dot min
 x2_max =  10;  % theta_dot max
-x1_N = 101;    % number of grid points for theta
-x2_N = 101;    % number of grid points for theta_dot
-x1_grid = linspace(x1_min, x1_max, x1_N);
+x1_N = 121;    % number of grid points for theta
+x2_N = 121;    % number of grid points for theta_dot
 x2_grid = linspace(x2_min, x2_max, x2_N);
+x1_grid = linspace(x1_min, x1_max, x1_N+1);
+x1_grid(end) = [];          % represent [-pi, pi)
+x1_N = numel(x1_grid);      % equals original x1_N
 
 % input discretization
-u_min = -10; % min torque
-u_max = 10;  % max torque
-u_N = 101;    % number of grid points for torque
+u_min = -5;   % min torque
+u_max =  5;   % max torque
+u_N = 121;    % number of grid points for torque
 u_grid = linspace(u_min, u_max, u_N);
 
 % create the dynamics function
@@ -41,9 +43,9 @@ dyn_params.dt = dt;
 [f_cont, f_disc] = make_dynamics_functions(dyn_params);
 
 % create the cost function 
-cost_params.Q = diag([20, 1]);    % state cost weights
-cost_params.R = 0.01;             % input cost weight
-cost_params.Qf = diag([200, 10]); % final state cost weights
+cost_params.Q  = diag([20, 20, 1]);   % [sin, cos, omega]
+cost_params.Qf = diag([200, 200, 10]);   % [sin, cos, omega]
+cost_params.R = 0.001;             % input cost weight
 [c_stage, c_terminal] = make_cost_functions(cost_params, x_des);
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -100,7 +102,7 @@ for k = N:-1:1
                 [i_grid, j_grid] = nearest_grid_index(x_next, x1_grid, x2_grid);
 
                 % Bellman backup:
-                J = c_stage(x, u) + V(i_grid, j_grid, k+1);
+                J = c_stage(x, u) * dt + V(i_grid, j_grid, k+1);
 
                 % check if this is the best so far
                 if J < J_star
@@ -127,7 +129,11 @@ end
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 % variables to save
-vars = {'V', 'pi_star', 'x1_grid', 'x2_grid', 'u_grid', 'dt', 'N'};
+vars = {'V', 'pi_star', ...
+        'x1_grid', 'x2_grid', 'u_grid', ...
+        'x_des', ...
+        'dt', 'N', ...
+        'dyn_params', 'cost_params'};
 
 % save the value function and policy
 save('results.mat', vars{:});
@@ -138,9 +144,6 @@ save('results.mat', vars{:});
 
 % dynamics function
 function [f_cont, f_disc] = make_dynamics_functions(params)
-
-    % make symbolic variables
-    syms x1 x2 u real
 
     % extract the parameters
     m = params.m;
@@ -170,38 +173,56 @@ function x_next = rk4(f_cont, x, u, dt)
     x_next = x + (dt/6) * (k1 + 2*k2 + 2*k3 + k4);
 end
 
-% cost functions
+% cost functions (periodic angle cost using sin/cos embedding)
 function [c_stage, c_terminal] = make_cost_functions(params, x_des)
 
-    % extract cost parameters
-    Q  = params.Q;
+    Q  = params.Q;   % now 3x3
     R  = params.R;
-    Qf = params.Qf;
+    Qf = params.Qf;  % now 3x3
 
-    % cost function handles
-    c_stage = @(x,u) 0.5 * (err(x,x_des)'*Q*err(x,x_des)) + 0.5*R*u*u;
-    c_terminal = @(x) 0.5 * (err(x,x_des)'*Qf*err(x,x_des));
+    % precompute desired sin/cos
+    sd = sin(x_des(1));
+    cd = cos(x_des(1));
+    wd = x_des(2);
+
+    c_stage = @(x,u) 0.5 * (err_trig(x,sd,cd,wd)'*Q*err_trig(x,sd,cd,wd)) ...
+                     + 0.5*R*u*u;
+
+    c_terminal = @(x) 0.5 * (err_trig(x,sd,cd,wd)'*Qf*err_trig(x,sd,cd,wd));
 end
 
-% error function (with angle wrapping)
-function e = err(x, x_des)
-    e1 = wrap_to_pi(x(1) - x_des(1));   % wrap the ANGLE ERROR
-    e2 = x(2) - x_des(2);
-    e = [e1; e2];
+% error in over-parameterized angle coordinates
+function e = err_trig(x, sd, cd, wd)
+    th = x(1);
+    om = x(2);
+    e = [sin(th) - sd;
+         cos(th) - cd;
+         om - wd];
+end
+
+% find nearest grid index for a given state (fast for uniform grids)
+function [i,j] = nearest_grid_index(x, x1_grid, x2_grid)
+
+    % wrap angle and clamp omega
+    th = wrap_to_pi(x(1));
+    om = min(max(x(2), x2_grid(1)), x2_grid(end));
+
+    % grid sizes and spacings
+    n1 = numel(x1_grid);
+    n2 = numel(x2_grid);
+    d1 = x1_grid(2) - x1_grid(1);
+    d2 = x2_grid(2) - x2_grid(1);
+
+    % nearest-index formula (1-based)
+    i = 1 + round((th - x1_grid(1)) / d1);
+    j = 1 + round((om - x2_grid(1)) / d2);
+
+    % clamp indices to valid range
+    i = min(max(i, 1), n1);
+    j = min(max(j, 1), n2);
 end
 
 % wrap angle to [-pi, pi]
 function angle_wrapped = wrap_to_pi(angle)
     angle_wrapped = mod(angle + pi, 2 * pi) - pi;
-end
-
-% find nearest grid index for a given state
-function [i,j] = nearest_grid_index(x, x1_grid, x2_grid)
-    % wrap angle and clamp omega to bounds
-    x(1) = wrap_to_pi(x(1));
-    x(2) = min(max(x(2), x2_grid(1)), x2_grid(end));
-
-    % find nearest indices
-    [~, i] = min(abs(x1_grid - x(1)));
-    [~, j] = min(abs(x2_grid - x(2)));
 end
