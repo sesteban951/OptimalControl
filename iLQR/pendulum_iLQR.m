@@ -9,7 +9,7 @@ clear; clc; close all;
 
 % simulation parameters
 tf = 8.0;
-dt = 0.04;
+dt = 0.025;
 tspan = 0:dt:tf;
 N = numel(tspan) - 1;
 
@@ -21,35 +21,38 @@ dyn_params.g = 9.81;
 dyn_params.dt = dt;
 
 % create the cost function 
-cost_params.Q  = diag([10, 1]);  
-cost_params.Qf = diag([100, 10]);
+cost_params.Q  = diag([10, 10, 1.0]);    
+cost_params.Qf = diag([100, 100, 10]);
 cost_params.R = 0.01;           
 
 % set optimization options
-opt_params.max_iters = 200;                                % maximum iLQR iterations
+opt_params.max_iters = 500;                                % maximum iLQR iterations
 opt_params.tol       = 1e-6;                               % convergence tolerance
-opt_params.alphas    = [1.0, 0.5, 0.25, 0.1, 0.05, 0.01];  % line search alphas
-opt_params.mu0       = 1e-3;                               % initial regularization
-opt_params.mu_factor  = 10;                                % mu increase/decrease factor
+opt_params.alphas    = [1.0, 0.75, 0.5, 0.25, 0.1, 0.01];  % line search alphas
+opt_params.mu0       = 1e-6;                               % initial regularization for Quu
+opt_params.mu_factor = 10;                                 % mu increase/decrease factor
 opt_params.mu_min    = 1e-6;                               % minimum mu
-opt_params.mu_max    = 1e6;                                % maximum mu
+opt_params.mu_max    = 1e3;                                % maximum mu
 
 % function handle for discrete dynamics with Jacobians (consistent RK4)
 % f_step(x,u) -> [x_next, Ad, Bd]
 f_step = @(x,u) rk4_step_with_jacobians(x, u, dyn_params);
+
+% plotting options
+plot_setting = 1; % 1: pendulum, 2: normal plots
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 % MAIN iLQR LOOP
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 % initial condition
-x0 = [0; 0];
+x0 = [pi/2; -1.0];
 
 % initial guesses
-xdes = [pi; 0];              % desired upright state
+xdes = [pi; 0];               % desired upright state
 U    = zeros(1, N) + 0.01;   % initial control guess (1xN)
 
-% do an initial rollout
+% do an initial rollout, TODO: make a better initial guess like energy shaping
 [X, J] = rollout(x0, xdes, U, f_step, cost_params, N);
 
 % history
@@ -60,6 +63,7 @@ J_hist(1) = J;
 mu = opt_params.mu0;
 
 % main iLQR iteration
+fprintf("Starting iLQR optimization...\n");
 for iter = 1:opt_params.max_iters
 
     % linearize along current trajectory
@@ -69,7 +73,7 @@ for iter = 1:opt_params.max_iters
     [k_seq, K_seq, success] = backward_pass(X, U, xdes, Ad_list, Bd_list, N, mu, cost_params);
 
     % check if backward pass succeeded
-    if ~success
+    if success == false
         % increase mu and try again
         mu = min(mu * opt_params.mu_factor, opt_params.mu_max);
         fprintf("iter %d: backward pass failed, increasing mu -> %.2e\n", iter, mu);
@@ -83,46 +87,56 @@ for iter = 1:opt_params.max_iters
         continue;
     end
 
-    % 3) forward pass line search
-    accepted = false;
-    best = struct('J', inf, 'X', [], 'U', [], 'alpha', NaN);
+    % forward pass line search
+    accepted = false;                                             % flag for accepted step
+    best_step = struct('J', inf, 'X', [], 'U', [], 'alpha', NaN); % best found step
 
+    % try different alphas
     for a = opt_params.alphas
-        [X_try, U_try, J_try] = forward_pass(x0, xdes, X, U, k_seq, K_seq, a, f_step, cost_params, N);
 
-        if J_try < best.J
-            best.J = J_try;
-            best.X = X_try;
-            best.U = U_try;
-            best.alpha = a;
+        % perform forward pass with this alpha
+        [X_try, U_try, J_try] = forward_pass(x0, xdes, X, U, k_seq, K_seq, a, f_step, cost_params, N);
+        
+        % check if this is the best step so far and store it
+        if J_try < best_step.J
+            best_step.J = J_try;
+            best_step.X = X_try;
+            best_step.U = U_try;
+            best_step.alpha = a;
         end
 
-        % accept first improving step (simple + common)
+        % accept first improving step
         if J_try < J
             accepted = true;
             break;
         end
     end
 
-    if accepted
-        X = best.X;
-        U = best.U;
+    % update trajectories if step was accepted
+    if accepted == true
 
-        dJ = J - best.J;
-        J  = best.J;
+        % update trajectories
+        X = best_step.X;
+        U = best_step.U;
+
+        % compute cost improvement
+        dJ = J - best_step.J;
+        J  = best_step.J;
         J_hist(iter+1) = J;
 
         % decrease mu when step succeeds (trust model more)
         mu = max(mu / opt_params.mu_factor, opt_params.mu_min);
 
-        fprintf("iter %d: J=%.6f, dJ=%.3e, alpha=%.3f, mu=%.2e\n", ...
-                iter, J, dJ, best.alpha, mu);
+        fprintf("iter %d: J=%.3f, dJ=%.3e, alpha=%.3f, mu=%.2e\n", ...
+                iter, J, dJ, best_step.alpha, mu);
 
         % convergence check
         if abs(dJ) < opt_params.tol
             J_hist = J_hist(1:iter+1);
             break;
         end
+
+    % no acceptable step found, increase mu
     else
         % no alpha improved cost -> increase mu and try again
         mu = min(mu * opt_params.mu_factor, opt_params.mu_max);
@@ -136,20 +150,91 @@ for iter = 1:opt_params.max_iters
     end
 end
 
+fprintf("iLQR optimization complete in %d iterations.\n", size(J_hist,1)-1);
+
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 % PLOTTING
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-% plot convergence
-figure; 
-plot(J_hist, 'LineWidth', 1.5); grid on;
-xlabel('iteration'); ylabel('J'); title('iLQR cost convergence');
+% animate the pendulum
+if plot_setting == 1
 
-% plot final angle trajectory
-figure; 
-plot(tspan, X(1,:), 'LineWidth', 1.5); hold on; yline(pi,'--'); grid on;
-xlabel('t'); ylabel('\theta'); title('Final trajectory');
+    % import helper functions
+    addpath('../InvertedPendulum/');
+    figure(1);
+    hold off;
+    xlim([-1.25 1.25]);
+    ylim([-1.25 1.25]);
+    axis equal;
 
+    k = 1;
+    while true
+
+        % get current time
+        time = dt*(k-1);
+
+        % draw the pendulum at time step k
+        [base, pole, ball] = draw_pendulum(time, X(:,k), dyn_params);
+
+        % update title
+        msg = sprintf('Inverted Pendulum at Time t = %.2f s', time);
+        title(msg);
+
+        % pause for dt seconds
+        pause(dt);
+
+        % delete previous drawings
+        delete(base);
+        delete(pole);
+        delete(ball);
+
+        % increment or reset k
+        k = k + 1;
+        if k == N+1
+            k = 1;
+        end
+    end
+
+end
+
+% plot all sorts of stuff
+if plot_setting == 2
+    
+    figure(2);
+
+    % pendulum angle
+    subplot(2,2,1);
+    plot(tspan, X(1,:), 'LineWidth', 2);
+    xlabel('Time (s)');
+    ylabel('Angle (rad)');
+    title('Pendulum Angle Trajectory');
+    grid on;
+
+    % pendulum angular velocity
+    subplot(2,2,2);
+    plot(tspan, X(2,:), 'LineWidth', 2);
+    xlabel('Time (s)');
+    ylabel('Angular Velocity (rad/s)');
+    title('Pendulum Angular Velocity Trajectory');
+    grid on;
+
+    % plot control inputs
+    subplot(2,2,3);
+    stairs(tspan(1:end-1), U, 'LineWidth', 2);
+    xlabel('Time (s)');
+    ylabel('Control Input (Torque)');
+    title('Control Input Trajectory');
+    grid on;
+
+    % plot cost history
+    subplot(2,2,4);
+    plot(0:length(J_hist)-1, J_hist, '-o', 'LineWidth', 2);
+    xlabel('iLQR Iteration');
+    ylabel('Total Cost J');
+    title('iLQR Cost History');
+    grid on;
+
+end
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 % iLQR Helper Functions
@@ -157,41 +242,77 @@ xlabel('t'); ylabel('\theta'); title('Final trajectory');
 
 % stage cost function and
 function [l, lx, lu, lxx, luu, lux] = stage_cost(x, u, xdes, cost_params)
-    
+
     % unpack cost parameters
-    Q = cost_params.Q;
-    R = cost_params.R;
+    Q = cost_params.Q;   % 3x3
+    R  = cost_params.R;    % scalar
 
-    % wrap angle error
-    e = [wrap_pi(x(1) - xdes(1));
-         x(2) - xdes(2)];
+    % unpack state
+    th = x(1);  
+    w = x(2);
+    th_des = xdes(1);
+    w_des = xdes(2);
 
-    % cost and derivatives
-    l   = 0.5 * (e'*Q*e) + 0.5 * (u'*R*u);
-    lx  = Q*e;
-    lu  = R*u;
-    lxx = Q;
+    % compute the error
+    y    = [cos(th); 
+            sin(th); 
+            w];
+    ydes = [cos(th_des); 
+            sin(th_des); 
+            w_des];
+    e = y - ydes;
+
+    % output Jacobian
+    J = [-sin(th)  0;
+          cos(th)  0;
+          0        1];
+
+    % compute the stage cost
+    l  = 0.5 * (e.' * Q * e) + 0.5 * (u.' * R * u);
+    lx  = J.' * (Q * e);
+    lu  = R * u;
+
+    % compute the Hessians
+    lxx = J.' * Q * J;  % approximated via Gauss-Newton Hessian (PSD)
     luu = R;
     lux = zeros(1,2);
 end
 
-% terminal cost function and derivatives
+% terminal cost function
 function [lf, lfx, lfxx] = terminal_cost(x, xdes, cost_params)
-    
+
     % unpack cost parameters
-    Qf = cost_params.Qf;
+    Qf = cost_params.Qf; % 3x3
 
-    % wrap angle error
-    e = [wrap_pi(x(1) - xdes(1));
-         x(2) - xdes(2)];
+    % unpack state
+    th = x(1);  
+    w = x(2);
+    th_des = xdes(1);
+    w_des = xdes(2);
 
-    % cost and derivatives
-    lf  = 0.5 * (e'*Qf*e);
-    lfx =  Qf*e;
-    lfxx = Qf;
+    % compute the error
+    y    = [cos(th); 
+            sin(th); 
+            w];
+    ydes = [cos(th_des); 
+            sin(th_des); 
+            w_des];
+    e = y - ydes;
+
+    % output Jacobian
+    J = [-sin(th)  0;
+          cos(th)  0;
+          0        1];
+
+    % compute the terminal cost
+    lf = 0.5 * (e.' * Qf * e); 
+    lfx  = J.' * (Qf * e); 
+
+    % compute the Hessian
+    lfxx = J.' * Qf * J;      % approximated via Gauss-Newton Hessian (PSD)
 end
 
-% forward pass: apply du = alpha*k + K*(x_new - x_nom) and roll out
+% forward pass: apply du = alpha * k_ff + k_fb * (x_new - x_nom) and roll out
 function [X_new, U_new, J_new] = forward_pass(x0, xdes,X_nom, U_nom, ...
                                               K_ff_seq, K_fb_seq, ...
                                               alpha, f_step, cost_params, N)
@@ -217,12 +338,13 @@ function [X_new, U_new, J_new] = forward_pass(x0, xdes,X_nom, U_nom, ...
 
         % control update
         dx = xk_new - xk_nom;           % (2x1)
+        dx(1) = wrap_pi(dx(1));         % wrap angle error
         du = alpha * k_ff + k_fb * dx;  % scalar
 
         % updated control
         uk_new = U_nom(k) + du;
         
-        % saturate inputs to reasonable limits
+        % enforce control limits
         % umax = 7.0;
         % uk_new = max(min(uk_new, umax), -umax);
         
@@ -280,13 +402,10 @@ function [K_ff_seq, K_fb_seq, success] = backward_pass(X, U, xdes, ...
         Qux = lux + Bd' * Vxx * Ad;
 
         % regularize Quu to keep it PD / invertible
-        Quu_reg = Quu;
-        if Quu_reg <= 1e-6   % tiny threshold helps numerical issues
-            Quu_reg = Quu + mu;
-            if Quu_reg <= 1e-6
-                success = false;
-                return;
-            end
+        Quu_reg = Quu + mu;          % always regularize
+        if Quu_reg <= 0
+            success = false;
+            return;
         end
 
         %  local optimal control law
