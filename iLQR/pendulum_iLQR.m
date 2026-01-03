@@ -9,24 +9,27 @@ clear; clc; close all;
 
 % simulation parameters
 tf = 8.0;
-dt = 0.025;
+dt = 0.04;
 tspan = 0:dt:tf;
 N = numel(tspan) - 1;
 
 % create the dynamics function
-dyn_params.m = 1;
-dyn_params.b = 0.01;
-dyn_params.l = 1;
-dyn_params.g = 9.81;
-dyn_params.dt = dt;
+dyn_params.dt = dt;       % timestep
+dyn_params.m = 1;         % mass
+dyn_params.b = 0.01;      % damping
+dyn_params.l = 1;         % length
+dyn_params.g = 9.81;      % gravity
+dyn_params.u_sat = true;  % saturate inputs
+dyn_params.umin = -2.0;   % min control
+dyn_params.umax =  2.0;   % max control
 
 % create the cost function 
-cost_params.Q  = diag([10, 10, 1.0]);    
+cost_params.Q  = diag([10,  10, 1]);    
 cost_params.Qf = diag([100, 100, 10]);
-cost_params.R = 0.01;           
+cost_params.R = 0.001;           
 
 % set optimization options
-opt_params.max_iters = 500;                                % maximum iLQR iterations
+opt_params.max_iters = 900;                                % maximum iLQR iterations
 opt_params.tol       = 1e-6;                               % convergence tolerance
 opt_params.alphas    = [1.0, 0.75, 0.5, 0.25, 0.1, 0.01];  % line search alphas
 opt_params.mu0       = 1e-6;                               % initial regularization for Quu
@@ -46,14 +49,15 @@ plot_setting = 1; % 1: pendulum, 2: normal plots
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 % initial condition
-x0 = [pi/2; -1.0];
+x0 = [0.0; 0.0];
 
 % initial guesses
 xdes = [pi; 0];               % desired upright state
-U    = zeros(1, N) + 0.01;   % initial control guess (1xN)
+% U    = zeros(1, N);   % initial control guess (1xN)
+U = 0.2 * randn(1, N);   % zero-mean exploration
 
 % do an initial rollout, TODO: make a better initial guess like energy shaping
-[X, J] = rollout(x0, xdes, U, f_step, cost_params, N);
+[X, J, U] = rollout(x0, xdes, U, N, f_step, cost_params, dyn_params);
 
 % history
 J_hist = zeros(opt_params.max_iters+1,1);
@@ -70,7 +74,7 @@ for iter = 1:opt_params.max_iters
     [Ad_list, Bd_list] = linearize_about_trajectory(X, U, f_step, N);
 
     % backward pass (if fails, increase mu and retry)
-    [k_seq, K_seq, success] = backward_pass(X, U, xdes, Ad_list, Bd_list, N, mu, cost_params);
+    [k_seq, K_seq, success] = backward_pass(X, U, xdes, Ad_list, Bd_list, N, mu, cost_params, dyn_params);
 
     % check if backward pass succeeded
     if success == false
@@ -95,7 +99,7 @@ for iter = 1:opt_params.max_iters
     for a = opt_params.alphas
 
         % perform forward pass with this alpha
-        [X_try, U_try, J_try] = forward_pass(x0, xdes, X, U, k_seq, K_seq, a, f_step, cost_params, N);
+        [X_try, U_try, J_try] = forward_pass(x0, xdes, X, U, k_seq, K_seq, a, N, f_step, cost_params, dyn_params);
         
         % check if this is the best step so far and store it
         if J_try < best_step.J
@@ -315,7 +319,7 @@ end
 % forward pass: apply du = alpha * k_ff + k_fb * (x_new - x_nom) and roll out
 function [X_new, U_new, J_new] = forward_pass(x0, xdes,X_nom, U_nom, ...
                                               K_ff_seq, K_fb_seq, ...
-                                              alpha, f_step, cost_params, N)
+                                              alpha, N, f_step, cost_params, dyn_params)
 
     % pre allocate new trajectories
     X_new = zeros(2, N+1);
@@ -345,8 +349,9 @@ function [X_new, U_new, J_new] = forward_pass(x0, xdes,X_nom, U_nom, ...
         uk_new = U_nom(k) + du;
         
         % enforce control limits
-        % umax = 7.0;
-        % uk_new = max(min(uk_new, umax), -umax);
+        if dyn_params.u_sat == true
+            uk_new = min(max(uk_new, dyn_params.umin), dyn_params.umax);
+        end
         
         % stage cost
         [lk, ~, ~, ~, ~, ~] = stage_cost(xk_new, uk_new, xdes, cost_params);
@@ -368,7 +373,7 @@ end
 % backward pass: compute optimal control law
 function [K_ff_seq, K_fb_seq, success] = backward_pass(X, U, xdes, ...
                                                        Ad_list, Bd_list, ...
-                                                       N, mu, cost_params)
+                                                       N, mu, cost_params, dyn_params)
 
     % create storage for gains
     K_ff_seq = zeros(1, N);       % feedforward
@@ -408,10 +413,34 @@ function [K_ff_seq, K_fb_seq, success] = backward_pass(X, U, xdes, ...
             return;
         end
 
-        %  local optimal control law
+        % local optimal control law, NOTE: can solve a QP with box constraints here
         % du = argmin (0.5 du' Quu du + (Qux dx + Qu)' du + const)
         K_ff = -(Quu_reg \ Qu);      % (1x1)
         K_fb = -(Quu_reg \ Qux);     % (1x2)
+
+        % handle input saturation by modifying k_ff and K_fb
+        if dyn_params.u_sat == true
+
+            % bounds on du around the current nominal uk
+            dumin = dyn_params.umin - uk;
+            dumax = dyn_params.umax - uk;
+
+            % project the nominal step (dx = 0) into feasible interval
+            K_ff_proj = min(max(K_ff, dumin), dumax);
+
+            % if we hit a bound, treat input as locally saturated:
+            % du no longer responds (locally) to dx => zero feedback gain
+            if abs(K_ff_proj - K_ff) > 1e-12
+                K_ff = K_ff_proj;
+                K_fb = zeros(1,2);
+            else
+                % (optional) keep some feedback but ensure it can't violate bounds
+                % A simple conservative version is still: keep K_fb as-is.
+                % More exact would be to also clip in forward pass (you already do).
+            end
+        end
+
+        % store gains
         K_ff_seq(:,k)   = K_ff;
         K_fb_seq(:,:,k) = K_fb;
 
@@ -425,11 +454,12 @@ function [K_ff_seq, K_fb_seq, success] = backward_pass(X, U, xdes, ...
 end
 
 % dynamics rollout
-function [X, J] = rollout(x0, xdes, U, f_step, cost_params, N)
+function [X, J, U_clamped] = rollout(x0, xdes, U, N, f_step, cost_params, dyn_params)
 
     % pre allocate state trajectory
     X = zeros(2, N+1);
     X(:,1) = x0;
+    U_clamped = zeros(1, N);
 
     % initialize cost
     J = 0;
@@ -440,6 +470,12 @@ function [X, J] = rollout(x0, xdes, U, f_step, cost_params, N)
 
         % get the current state and input
         uk = U(k);
+
+        % saturate inputs
+        if dyn_params.u_sat == true
+            uk = min(max(uk, dyn_params.umin), dyn_params.umax);
+        end
+        U_clamped(k) = uk;
 
         % compute stage cost and accumulate
         [lk, ~, ~, ~, ~, ~] = stage_cost(xk, uk, xdes, cost_params);
@@ -539,12 +575,17 @@ function [x_next, Ad, Bd] = rk4_step_with_jacobians(x, u, params)
     % xdot      = f(x,u)                         (2x1)
     % Phidot    = Ac(x)*Phi                      (2x2)
     % Gammadot  = Ac(x)*Gamma + Bc(x)            (2x1)
-    function [xdot, Phidot, Gammadot] = aug_dyn(x, u, Phi, Gamma)
-        xdot = f_cont(x, u, params);
+    function [xdot, Phidot, Gammadot] = aug_dyn(x, u_raw, Phi, Gamma)
+
+        % clamp control input and get derivative
+        [u_eff, sigma] = clamp_u(u_raw, params);
+
+        % augmented dynamics
+        xdot = f_cont(x, u_eff, params);
         Ac   = make_Ac(x, params);
         Bc   = make_Bc(x, params);
         Phidot   = Ac * Phi;
-        Gammadot = Ac * Gamma + Bc;
+        Gammadot = Ac * Gamma + sigma * Bc; % chain rule for du_eff/du
     end
 
     % initialize sensitivities 
@@ -578,6 +619,30 @@ end
 % wrap angle to [-pi, pi]
 function a = wrap_pi(a)
     a = mod(a + pi, 2*pi) - pi;
+end
+
+% clamp control input and get derivative
+function [u_eff, sigma] = clamp_u(u, dyn_params)
+
+    % unpack parameters
+    saturate = dyn_params.u_sat;
+
+    % if no saturation, return directly
+    if saturate == false
+        u_eff = u; 
+        sigma = 1; 
+        return;
+    end
+
+    % get limits
+    umin = dyn_params.umin;
+    umax = dyn_params.umax;
+
+    % clamp the input
+    u_eff = min(max(u, umin), umax);
+
+    % du_eff/du (piecewise). At exactly the bound it's undefined; 0 is safer.
+    sigma = double(u > umin && u < umax);
 end
 
 % linearize about a trajectory
