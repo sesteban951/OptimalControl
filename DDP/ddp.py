@@ -2,6 +2,7 @@
 import numpy as np   
 from numpy.typing import ArrayLike
 from dataclasses import dataclass
+import matplotlib.pyplot as plt
 
 # symbolic math
 import sympy as sym  
@@ -16,22 +17,24 @@ from system_dynamics import Pendulum
 # params for DDP
 @dataclass
 class DDPParams:
+
+    # time parameters
+    dt: float = 0.04               # time step
     
     # DDP parameters
-    max_iters: int = 100        # maximum DDP iterations
-    tol: float = 1e-6           # convergence tolerance
-    alphas: ArrayLike = [1.0],  # line search parameters for backtracking
-    use_hessians: bool = True   # use 2nd order dynamics derivatives
+    max_iters: int = 100           # maximum DDP iterations
+    tol: float = 1e-6              # convergence tolerance
+    alphas: ArrayLike = [1.0],     # line search parameters for backtracking
+    use_dyn_hessians: bool = False # use 2nd order dynamics derivatives
 
 # main DDP class
 class DDP:
 
     # initialize
-    def __init__(self,
-                 system,
-                 x0, xdes,
-                 T, dt
-                 ):
+    def __init__(self, system, params):
+
+        # DDP optimization parameters
+        self.params = params
 
         # dynamics
         self.nx = system.nx          # state dimension
@@ -42,16 +45,11 @@ class DDP:
         # cost functions
         self.l_  = system.l              # running cost
         self.lf_ = system.lf            # terminal cost
-        
-        # initial and desired state state
-        self.x0 = x0
-        self.xdes = xdes
 
-        # time horizon
-        self.T = T
-        self.dt = dt
+        # time parameters
+        self.dt = params.dt
 
-        # make the functions
+        # make all functions and derivatives
         self.make_functions()
 
     # make the dynamics functions and their gradients
@@ -83,10 +81,11 @@ class DDP:
         self.f_u = sym.lambdify((x, u), f_u)      # ∂f/∂u  (nx × nu)
 
         # 2nd order derivatives
-        print("\tMaking 2nd order dynamics derivatives...")
-        self.f_xx = sym.lambdify((x, u), [f_x.row(i).jacobian(x) for i in range(self.nx)])  # ∂²f/∂x²   (nx × nx × nx) tensor
-        self.f_ux = sym.lambdify((x, u), [f_u.row(i).jacobian(x) for i in range(self.nx)])  # ∂²f/∂u∂x  (nx × nu × nx) tensor
-        self.f_uu = sym.lambdify((x, u), [f_u.row(i).jacobian(u) for i in range(self.nx)])  # ∂²f/∂u²   (nx × nu × nu) tensor
+        if self.params.use_dyn_hessians == True:
+            print("\tMaking 2nd order dynamics derivatives...")
+            self.f_xx = sym.lambdify((x, u), [f_x.row(i).jacobian(x) for i in range(self.nx)])  # ∂²f/∂x²   (nx × nx × nx) tensor
+            self.f_ux = sym.lambdify((x, u), [f_u.row(i).jacobian(x) for i in range(self.nx)])  # ∂²f/∂u∂x  (nx × nu × nx) tensor
+            self.f_uu = sym.lambdify((x, u), [f_u.row(i).jacobian(u) for i in range(self.nx)])  # ∂²f/∂u²   (nx × nu × nu) tensor
 
         # cost functions
         print("\tMaking cost functions...")
@@ -107,19 +106,210 @@ class DDP:
         self.lf_xx = sym.lambdify((x, xdes), self.lf_(x, xdes).jacobian(x).jacobian(x))     # ∂²lf/∂x² (nx × nx)
 
     # do main DDP optimization
-    def optimize(self):
+    def optimize(self, x0, xdes, T):
 
-        pass # TODO: implement DDP optimization loop
+        # compute the trajectory length 
+        N = int(T // self.dt)
 
+        # generate a random control sequence from normal distribution
+        U = np.random.randn(N, self.nu) * 0.1
+
+        # convenience function to compute cost
+        def J(X, U):
+            c_total = 0.0
+            for k in range(len(U)):
+                c_total += self.l(X[k], U[k], xdes)
+            c_total += self.lf(X[-1], xdes)
+
+            return c_total
+        
+        # rollout the initial trajectory
+        X = np.zeros((N+1, self.nx))
+        X[0] = x0.flatten()
+        for k in range(N):
+            X[k+1] = self.f(X[k], U[k]).flatten() # x_next = f(x, u)  (discrete dynamics)
+
+        # compute initial cost
+        J_curr = J(X, U)
+
+        # flag to stop optimization
+        done = False
+
+        # DDP main loop
+        print("Starting DDP optimization...")
+        for i in range(self.params.max_iters):  
+
+            print(f"Iteration {i+1}")
+
+            # backwards pass
+            V_x  = self.lf_x(X[-1],  xdes).flatten()  # Vx = ∂V/∂x at final time
+            V_xx = self.lf_xx(X[-1], xdes)            # Vxx = ∂²V/∂x² at final time
+
+            # create arrays for Q derivatives
+            Qu_list =  np.zeros((N, self.nu))
+            Quu_list = np.zeros((N, self.nu, self.nu))
+            Qux_list = np.zeros((N, self.nu, self.nx))
+
+            # ----------------------------------------
+            # BACKWARDS PASS
+            # ----------------------------------------
+            for k in reversed(range(N)):
+                
+                # get current state and input
+                x_k = X[k].reshape(self.nx, 1)
+                u_k = U[k].reshape(self.nu, 1)
+
+                # dynamics approximation at (x_k, u_k)
+                f_x  = self.f_x(x_k, u_k).reshape(self.nx, self.nx)
+                f_u  = self.f_u(x_k, u_k).reshape(self.nx, self.nu)
+
+                if self.params.use_dyn_hessians == True:
+                    f_xx = np.stack([
+                        np.asarray(H, dtype=float).reshape(self.nx, self.nx)
+                        for H in self.f_xx(x_k, u_k)
+                    ], axis=0)                           # (nx, nx, nx)
+                    f_ux = np.stack([
+                        np.asarray(H, dtype=float).reshape(self.nu, self.nx)
+                        for H in self.f_ux(x_k, u_k)
+                    ], axis=0)                           # (nx, nu, nx)
+                    f_uu = np.stack([
+                        np.asarray(H, dtype=float).reshape(self.nu, self.nu)
+                        for H in self.f_uu(x_k, u_k)
+                    ], axis=0)                           # (nx, nu, nu)
+
+                # cost approximation at (x_k, u_k)
+                l_x  = self.l_x(x_k, u_k, xdes).flatten()      
+                l_u  = self.l_u(x_k, u_k, xdes).flatten()
+                l_xx = self.l_xx(x_k, u_k, xdes)
+                l_ux = self.l_ux(x_k, u_k, xdes)
+                l_uu = self.l_uu(x_k, u_k, xdes)
+
+                # compute Q function derivatives
+                Q_x  = l_x + f_x.T @ V_x
+                Q_u  = l_u + f_u.T @ V_x
+                Q_xx = l_xx + f_x.T @ V_xx @ f_x
+                Q_ux = l_ux + f_u.T @ V_xx @ f_x
+                Q_uu = l_uu + f_u.T @ V_xx @ f_u
+
+                if self.params.use_dyn_hessians == True:
+                    Q_xx += np.tensordot(V_x, f_xx, axes=(0,0))
+                    Q_ux += np.tensordot(V_x, f_ux, axes=(0,0))
+                    Q_uu += np.tensordot(V_x, f_uu, axes=(0,0))
+
+                # store Q derivatives
+                Qu_list[k]   = Q_u
+                Quu_list[k]  = Q_uu
+                Qux_list[k]  = Q_ux
+
+                # compute optimal control law
+                Quu_inv = np.linalg.pinv(Q_uu)  # pseudo-inverse for numerical stability
+                Vx =  Q_x  - Q_ux.T @ Quu_inv @ Q_u
+                Vxx = Q_xx - Q_ux.T @ Quu_inv @ Q_ux
+
+            # ----------------------------------------
+            # FORWARDS PASS w/ BACKTRACKING
+            # ----------------------------------------
+            for i, alpha in enumerate(self.params.alphas):
+
+                # initialize optimal trajectory
+                X_star = np.zeros_like(X)
+                U_star = np.zeros_like(U)
+                X_star[0] = x0.flatten()
+
+                # compute op
+                for k in range(N):
+                    
+                    # current state and input
+                    x_k = X[k]
+                    u_k = U[k]
+                    x_k_star = X_star[k]
+                    u_k_star = U_star[k]
+
+                    # current Q derivatives
+                    Q_u  = Qu_list[k]
+                    Q_ux = Qux_list[k]
+                    Q_uu = Quu_list[k]
+
+                    # compute error
+                    e = x_k_star - x_k
+                    U_star[k] = u_k - np.linalg.pinv(Q_uu) @ (alpha * Q_u + Q_ux @ e)
+                    X_star[k+1] = self.f(x_k_star, u_k_star).flatten()
+
+                # update cost  to see if there are improvements
+                J_new = J(X_star, U_star)
+                if J_new < J_curr:
+                    U = U_star
+                    X = X_star
+                    break
+                
+                # if no cost improvement found
+                if alpha == self.params.alphas[-1]:
+                    print("No cost improvement found in line search.")
+                    done = True
+            
+            # check for convergence at the end of the optimization cycle
+            J_diff = abs(J_curr - J_new)
+            if done or J_diff < self.params.tol:
+                break
+
+            # update current cost
+            J_curr = J_new
+
+        return X, U
 
 # example usage
 if __name__ == "__main__":
 
     # create DDP params
-    ddp_params = DDPParams()
+    ddp_params = DDPParams(
+        dt=0.05,
+        max_iters=10,
+        tol=1e-6,
+        alphas=[1.0, 0.75, 0.5, 0.25, 0.1, 0.01],
+        use_dyn_hessians=False
+    )
 
     # create DDP optimizer
-    ddp = DDP(Pendulum(), 
-              x0=np.zeros(4), 
-              xdes=np.zeros(4), 
-              T=5.0, dt=0.04)
+    ddp = DDP(system=Pendulum(), 
+              params=ddp_params)
+
+    # initial state
+    x0 =   np.array([1.0, 
+                     0.0, 
+                     0.0]).reshape(3,1)  # [theta, theta_dot]
+    xdes = np.array([-1.0, 
+                      0.0, 
+                      0.0]).reshape(3,1)  # desired state
+
+    # total time
+    T = 8.0
+
+    # run DDP optimization
+    X, U = ddp.optimize(x0, xdes, T)
+
+    # get angle from sin and cos
+    angles = np.arctan2(X[:,1], X[:,0])
+    X = np.hstack((angles.reshape(-1,1), X[:,2].reshape(-1,1)))  # [theta, theta_dot]
+
+    # compute the time span
+    time = np.arange(0, T, ddp.dt)
+
+    # plot the results
+    plt.figure(figsize=(10,6))
+    plt.subplot(3,1,1)
+    plt.plot(time, X[:,0], label='Theta (rad)')
+    plt.axhline(y=xdes[0], color='r', linestyle='--', label='Desired Theta')
+    plt.ylabel('Theta (rad)')
+    plt.legend()
+    plt.subplot(3,1,2)
+    plt.plot(time, X[:,1], label='Theta dot (rad/s)')
+    plt.axhline(y=xdes[1], color='r', linestyle='--', label='Desired Theta dot')
+    plt.ylabel('Theta dot (rad/s)')
+    plt.legend()
+    plt.subplot(3,1,3)
+    plt.plot(time[:-1], U, label='Control Input (u)')
+    plt.ylabel('Control Input (u)')
+    plt.xlabel('Time (s)')
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
