@@ -8,7 +8,7 @@ clear; clc; close all;
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 % simulation parameters
-tf = 8.0;
+tf = 10.0;
 dt = 0.04;
 tspan = 0:dt:tf;
 N = numel(tspan) - 1;
@@ -26,7 +26,7 @@ dyn_params.umax =  2.0;   % max control
 % create the cost function 
 cost_params.Q  = diag([10,  10, 1]);    
 cost_params.Qf = diag([100, 100, 10]);
-cost_params.R = 0.001;           
+cost_params.R = 0.1;
 
 % set optimization options
 opt_params.max_iters = 900;                                % maximum iLQR iterations
@@ -249,7 +249,7 @@ function [l, lx, lu, lxx, luu, lux] = stage_cost(x, u, xdes, cost_params)
 
     % unpack cost parameters
     Q = cost_params.Q;   % 3x3
-    R  = cost_params.R;    % scalar
+    R = cost_params.R;   % scalar
 
     % unpack state
     th = x(1);  
@@ -399,7 +399,6 @@ function [K_ff_seq, K_fb_seq, success] = backward_pass(X, U, xdes, ...
 
         % Q-function derivatives
         % Q = l(x,u) + V(f(x,u))
-        % Q ≈ l + V + Vx' (Ad dx + Bd du) + 0.5 [dx;du]' [Ad' Bd'] Vxx [Ad Bd] [dx;du]
         Qx  = lx  + Ad' * Vx;
         Qu  = lu  + Bd' * Vx;
         Qxx = lxx + Ad' * Vxx * Ad;
@@ -415,6 +414,7 @@ function [K_ff_seq, K_fb_seq, success] = backward_pass(X, U, xdes, ...
 
         % local optimal control law, NOTE: can solve a QP with box constraints here
         % du = argmin (0.5 du' Quu du + (Qux dx + Qu)' du + const)
+        % du_star = -Quu^{-1} * Qu - Quu^{-1} * Qux * dx
         K_ff = -(Quu_reg \ Qu);      % (1x1)
         K_fb = -(Quu_reg \ Qux);     % (1x2)
 
