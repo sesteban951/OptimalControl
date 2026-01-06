@@ -7,8 +7,6 @@ import matplotlib.pyplot as plt
 # symbolic math
 import sympy as sym  
 
-# custom import 
-from system_dynamics import Pendulum
 
 ##############################################################
 # Differential Dynamic Programming (DDP) Class
@@ -156,8 +154,8 @@ class DDP:
             for k in reversed(range(N)):
                 
                 # get current state and input
-                x_k = X[k].reshape(self.nx, 1)
-                u_k = U[k].reshape(self.nu, 1)
+                x_k = X[k]
+                u_k = U[k]
 
                 # dynamics approximation at (x_k, u_k)
                 f_x  = self.f_x(x_k, u_k).reshape(self.nx, self.nx)
@@ -203,8 +201,8 @@ class DDP:
 
                 # compute optimal control law
                 Quu_inv = np.linalg.pinv(Q_uu)  # pseudo-inverse for numerical stability
-                Vx =  Q_x  - Q_ux.T @ Quu_inv @ Q_u
-                Vxx = Q_xx - Q_ux.T @ Quu_inv @ Q_ux
+                V_x =  Q_x  - Q_ux.T @ Quu_inv @ Q_u
+                V_xx = Q_xx - Q_ux.T @ Quu_inv @ Q_ux
 
             # ----------------------------------------
             # FORWARDS PASS w/ BACKTRACKING
@@ -216,14 +214,8 @@ class DDP:
                 U_star = np.zeros_like(U)
                 X_star[0] = x0.flatten()
 
-                # compute op
+                # compute the new trajectory with the updated control law
                 for k in range(N):
-                    
-                    # current state and input
-                    x_k = X[k]
-                    u_k = U[k]
-                    x_k_star = X_star[k]
-                    u_k_star = U_star[k]
 
                     # current Q derivatives
                     Q_u  = Qu_list[k]
@@ -231,15 +223,15 @@ class DDP:
                     Q_uu = Quu_list[k]
 
                     # compute error
-                    e = x_k_star - x_k
-                    U_star[k] = u_k - np.linalg.pinv(Q_uu) @ (alpha * Q_u + Q_ux @ e)
-                    X_star[k+1] = self.f(x_k_star, u_k_star).flatten()
+                    e = X_star[k] - X[k]
+                    U_star[k] = U[k] - np.linalg.pinv(Q_uu) @ (alpha * Q_u + Q_ux @ e)
+                    X_star[k+1] = self.f(X_star[k], U_star[k]).flatten()
 
                 # update cost  to see if there are improvements
                 J_new = J(X_star, U_star)
                 if J_new < J_curr:
-                    U = U_star
                     X = X_star
+                    U = U_star
                     break
                 
                 # if no cost improvement found
@@ -256,60 +248,3 @@ class DDP:
             J_curr = J_new
 
         return X, U
-
-# example usage
-if __name__ == "__main__":
-
-    # create DDP params
-    ddp_params = DDPParams(
-        dt=0.05,
-        max_iters=10,
-        tol=1e-6,
-        alphas=[1.0, 0.75, 0.5, 0.25, 0.1, 0.01],
-        use_dyn_hessians=False
-    )
-
-    # create DDP optimizer
-    ddp = DDP(system=Pendulum(), 
-              params=ddp_params)
-
-    # initial state
-    x0 =   np.array([1.0, 
-                     0.0, 
-                     0.0]).reshape(3,1)  # [theta, theta_dot]
-    xdes = np.array([-1.0, 
-                      0.0, 
-                      0.0]).reshape(3,1)  # desired state
-
-    # total time
-    T = 8.0
-
-    # run DDP optimization
-    X, U = ddp.optimize(x0, xdes, T)
-
-    # get angle from sin and cos
-    angles = np.arctan2(X[:,1], X[:,0])
-    X = np.hstack((angles.reshape(-1,1), X[:,2].reshape(-1,1)))  # [theta, theta_dot]
-
-    # compute the time span
-    time = np.arange(0, T, ddp.dt)
-
-    # plot the results
-    plt.figure(figsize=(10,6))
-    plt.subplot(3,1,1)
-    plt.plot(time, X[:,0], label='Theta (rad)')
-    plt.axhline(y=xdes[0], color='r', linestyle='--', label='Desired Theta')
-    plt.ylabel('Theta (rad)')
-    plt.legend()
-    plt.subplot(3,1,2)
-    plt.plot(time, X[:,1], label='Theta dot (rad/s)')
-    plt.axhline(y=xdes[1], color='r', linestyle='--', label='Desired Theta dot')
-    plt.ylabel('Theta dot (rad/s)')
-    plt.legend()
-    plt.subplot(3,1,3)
-    plt.plot(time[:-1], U, label='Control Input (u)')
-    plt.ylabel('Control Input (u)')
-    plt.xlabel('Time (s)')
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
