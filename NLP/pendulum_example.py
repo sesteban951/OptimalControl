@@ -14,7 +14,7 @@ from nlp import NLPSolver, NLPSolverParams, NLPResult
 # Pendulm for NLP example
 class Pendulum:
 
-    def __init__(self):
+    def __init__(self, dt):
 
         # state dimension
         self.nx = 2  # [theta, theta_dot]
@@ -23,7 +23,11 @@ class Pendulum:
         self.nu = 1  # [torque]
 
         # input limits
-        self.u_lims = np.array([[-2.0], [2.0]])  # torque limits
+        self.u_lb = np.array([-2.0]).reshape(self.nu,1)  # lower input limits
+        self.u_ub = np.array([ 2.0]).reshape(self.nu,1)  # upper input limits
+
+        # time step
+        self.dt = dt
 
     # pendulum continuous dynamics
     def f_cont(self, x, u):
@@ -48,12 +52,9 @@ class Pendulum:
     
     # discrete dynamics
     def f_disc(self, xk, uk):
-        
-        # time step
-        dt = 0.01
 
         # euler integration
-        xk_next = xk + dt * self.f_cont(xk, uk)
+        xk_next = xk + self.dt * self.f_cont(xk, uk)
 
         return xk_next
     
@@ -79,9 +80,6 @@ class Pendulum:
 # example usage
 if __name__ == "__main__":
 
-    # create pendulum system
-    pendulum = Pendulum()
-
     # define NLP parameters
     nlp_params = NLPSolverParams(
         T       = 7.0,
@@ -89,6 +87,9 @@ if __name__ == "__main__":
         x_init  = np.array([0.0, 0.0]),
         x_goal  = np.array([np.pi, 0.0])
     )
+
+    # create pendulum system
+    pendulum = Pendulum(nlp_params.dt)
 
     # create NLP solver
     nlp_solver = NLPSolver(dynamics=pendulum, params=nlp_params)
@@ -111,3 +112,31 @@ if __name__ == "__main__":
     np.savetxt(input_file, U_opt)
 
     print(f"Optimal trajectories saved to:\n{state_file}\n{input_file}\n{time_file}")
+
+
+    # plot the results
+    plt.figure(figsize=(10, 8))
+    plt.subplot(3, 1, 1)
+    plt.plot(timespan, X_opt[:, 0], label='theta (rad)', color='orange')
+    plt.ylabel('Angle (rad)')
+    plt.grid()
+    plt.legend()    
+    plt.subplot(3, 1, 2)
+    plt.plot(timespan, X_opt[:, 1], label='theta_dot (rad/s)')
+    plt.ylabel('Angular Velocity (rad/s)')
+    plt.grid()
+    plt.legend()
+    plt.subplot(3, 1, 3)
+    plt.step(timespan[:-1], U_opt[:], label='Control Input (Nm)', where='post', color='purple')
+    plt.ylabel('Input (Nm)')
+    plt.xlabel('Time (s)')
+    plt.grid()
+    plt.legend()
+
+    plt.tight_layout()
+
+    # save image of the plot
+    plot_file = "./NLP/results/pendulum_trajectories.png"
+    plt.savefig(plot_file, dpi=200, bbox_inches="tight")
+
+    plt.show()

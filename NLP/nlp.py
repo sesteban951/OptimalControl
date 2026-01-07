@@ -82,13 +82,22 @@ class NLPSolver:
             opti.subject_to(X[:, k + 1] == self.f(X[:, k], U[:, k]))
 
         # add input constraints if any
-        if self.dynamics.u_lims is not None:
+        if hasattr(self.dynamics, 'u_lb') and hasattr(self.dynamics, 'u_ub'):
             # input bounds
-            u_lb = self.dynamics.u_lims[0, :]
-            u_ub = self.dynamics.u_lims[1, :]
+            u_lb = self.dynamics.u_lb
+            u_ub = self.dynamics.u_ub
 
             # add to optimizer
             opti.subject_to(opti.bounded(u_lb, U, u_ub))
+
+        # add state constraints if any
+        if hasattr(self.dynamics, 'x_lb') and hasattr(self.dynamics, 'x_ub'):
+            # state bounds
+            x_lb = self.dynamics.x_lb
+            x_ub = self.dynamics.x_ub
+
+            # add to optimizer
+            opti.subject_to(opti.bounded(x_lb, X, x_ub))
 
         # objective: minimize total cost
         J = 0
