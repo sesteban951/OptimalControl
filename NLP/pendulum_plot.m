@@ -8,8 +8,8 @@ addpath('../InvertedPendulum/');
 
 % load the results
 times = readmatrix('results/pendulum_time.csv');
-x_t = readmatrix('results/pendulum_state.csv');
-u_t = readmatrix('results/pendulum_input.csv');
+x_t = readmatrix('results/pendulum_states.csv');
+u_t = readmatrix('results/pendulum_inputs.csv');
 
 % compute number of time steps and dt
 nx = size(x_t,2);
