@@ -17,7 +17,7 @@ x0 = [0; 0];
 tspan = 0:dt:(N*dt);
 
 % plotting options
-plot_setting = 2; % 1: pendulum, 2: value function, 3: pi_star
+plot_setting = 1; % 1: pendulum, 2: value function, 3: pi_star
 value_plot_type = 'surface'; % 'heatmap' or 'surface' for value function
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%

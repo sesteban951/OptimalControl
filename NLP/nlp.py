@@ -45,15 +45,13 @@ class NLPSolver:
     # build functions
     def make_function(self):
 
-        # horiZon parameters
+        # horizon parameters
         self.dt = self.params.dt
         self.N = int(self.params.T / self.dt)
         
         # build state variables
         self.nx = self.dynamics.nx
         self.nu = self.dynamics.nu
-        self.xk = ca.MX.sym('x', self.nx)
-        self.uk = ca.MX.sym('u', self.nu)
 
         # build dynamics and cost function
         self.f = self.dynamics.f_disc
@@ -74,7 +72,7 @@ class NLPSolver:
         U = opti.variable(self.nu, self.N)      # input trajectory
 
         # set the initial and goal state constraints
-        opti.subject_to(X[:, 0]     == self.x_init)
+        opti.subject_to(X[:, 0]      == self.x_init)
         opti.subject_to(X[:, self.N] == self.x_goal)
 
         # system dynamics constraints at each time step
