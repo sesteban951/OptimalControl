@@ -8,7 +8,7 @@ clear; clc; close all;
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 % simulation parameters
-tf = 10.0;
+tf = 5.0;
 dt = 0.04;
 tspan = 0:dt:tf;
 N = numel(tspan) - 1;
@@ -20,8 +20,8 @@ dyn_params.b = 0.01;      % damping
 dyn_params.l = 1;         % length
 dyn_params.g = 9.81;      % gravity
 dyn_params.u_sat = true;  % saturate inputs
-dyn_params.umin = -2.0;   % min control
-dyn_params.umax =  2.0;   % max control
+dyn_params.umin = -3.0;   % min control
+dyn_params.umax =  3.0;   % max control
 
 % create the cost function 
 cost_params.Q  = diag([10,  10, 1]);    
