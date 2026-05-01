@@ -40,7 +40,7 @@ def f_cont(x, u, params):
     return torch.stack((theta_dot, theta_ddot), dim=-1)
 
 
-def rk4_step(x, u, params):
+def f_disc(x, u, params):
     """
     One RK4 step of the continuous dynamics. Fully batched.
 
@@ -77,7 +77,114 @@ def rollout(x0, U, params):
     X[:, 0] = x0
     xk = x0
     for k in range(N):
-        xk = rk4_step(xk, U[:, k], params)
+        xk = f_disc(xk, U[:, k], params)
         X[:, k + 1] = xk
     return X
 
+
+def Ac(x, u, params):
+    """
+    Continuous-time Jacobian w.r.t. state, batched.
+
+    Args:
+        x:    (B, 2) tensor   [theta, theta_dot]
+        u:    (B, 1) tensor   torque
+        params: dict containing system parameters
+    Returns:
+        Ac: (B, 2, 2) tensor
+    """
+    m = params["m"]  # mass
+    b = params["b"]  # damping
+    l = params["l"]  # length
+    g = params["g"]  # gravity
+
+    theta_bar = x[..., 0]
+
+    Ac_ = torch.zeros(x.shape[0], 2, 2, dtype=x.dtype, device=x.device)
+    Ac_[:, 0, 0] = 0.0
+    Ac_[:, 0, 1] = 1.0
+    Ac_[:, 1, 0] = -(g / l) * torch.cos(theta_bar)
+    Ac_[:, 1, 1] = -(b / (m * l**2))
+
+    return Ac_
+
+
+def Bc(x, u, params):
+    """
+    Continuous-time Jacobian w.r.t. control, batched.
+
+    Args:
+        x:    (B, 2) tensor   [theta, theta_dot]
+        u:    (B, 1) tensor   torque
+        params: dict containing system parameters
+    Returns:
+        Bc: (B, 2, 1) tensor
+    """
+    m = params["m"]  # mass
+    l = params["l"]  # length
+
+    Bc_ = torch.zeros(x.shape[0], 2, 1, dtype=x.dtype, device=x.device)
+    Bc_[:, 0, 0] = 0.0
+    Bc_[:, 1, 0] = (1.0 / (m * l**2))
+
+    return Bc_
+
+
+def Cc(x, u, params):
+    """
+    Continuous-time affine offset term, batched. (for original coords., not perturbation coords.)
+
+    Args:
+        x:    (B, 2) tensor   [theta, theta_dot], linearization point x_bar
+        u:    (B, 1) tensor   torque, linearization point u_bar
+        params: dict containing system parameters
+    Returns:
+        Cc: (B, 2, 1) tensor
+    """
+    l = params["l"]
+    g = params["g"]
+
+    theta_bar = x[..., 0]
+
+    Cc_ = torch.zeros(x.shape[0], 2, 1, dtype=x.dtype, device=x.device)
+    Cc_[:, 0, 0] = 0.0
+    Cc_[:, 1, 0] = -(g / l) * torch.sin(theta_bar) + (g / l) * theta_bar * torch.cos(theta_bar)
+
+    return Cc_
+
+def discretize_linear_system(Ac_, Bc_, Cc_, params):
+    """
+    Exact ZOH discretization of continuous-time affine system:
+        xdot = Ac x + Bc u + Cc
+    into
+        x_next = Ad x + Bd u + Cd
+
+    Args:
+        Ac_: (B, n, n)
+        Bc_: (B, n, m)
+        Cc_: (B, n, 1)
+        params: dict containing dt
+
+    Returns:
+        Ad_: (B, n, n)
+        Bd_: (B, n, m)
+        Cd_: (B, n, 1)
+    """
+    dt = params["dt"]
+
+    b, n, _ = Ac_.shape
+    m = Bc_.shape[-1]
+
+    M = torch.zeros(b, n + m + 1, n + m + 1, dtype=Ac_.dtype, device=Ac_.device)
+
+    M[:, :n, :n] = Ac_
+    M[:, :n, n:n+m] = Bc_
+    M[:, :n, n+m:n+m+1] = Cc_
+
+    Md = torch.linalg.matrix_exp(M * dt)
+
+    Ad_ = Md[:, :n, :n]
+    Bd_ = Md[:, :n, n:n+m]
+    Cd_ = Md[:, :n, n+m:n+m+1]
+
+    return Ad_, Bd_, Cd_
