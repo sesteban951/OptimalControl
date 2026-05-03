@@ -1,53 +1,62 @@
+##
+#
+# iLQR Sampling for pendulum swing-up
+#
+##
+
+import torch 
 import math
-
-import torch
-import matplotlib.pyplot as plt
-
-from pendulum import rollout
+from cost import *
+from pendulum import *
+from cem import *
 
 
-def main():
-    params = {
-        "m": 1.0,
-        "l": 1.0,
-        "b": 0.1,
-        "g": 9.81,
-        "dt": 0.01,
-        "umax": 3.0,
-    }
+##################################################
+# iLQR FUNCTIONS
+##################################################
 
-    B = 256          # number of rollouts
-    N = 250          # horizon length
-    n_plot = 10      # trajectories to plot
 
-    torch.manual_seed(0)
 
-    theta0     = (2.0 * torch.rand(B) - 1.0) * math.pi   # [-pi, pi]
-    theta_dot0 = (2.0 * torch.rand(B) - 1.0) * 2.0       # [-2, 2]
-    x0 = torch.stack((theta0, theta_dot0), dim=-1)
-
-    U = torch.randn(B, N, 1) * 0.5
-
-    X = rollout(x0, U, params)
-
-    t = torch.arange(N + 1) * params["dt"]
-    idx = torch.randperm(B)[:n_plot]
-
-    fig, axes = plt.subplots(2, 1, sharex=True, figsize=(8, 6))
-    for i in idx.tolist():
-        axes[0].plot(t, X[i, :, 0])
-        axes[1].plot(t, X[i, :, 1])
-
-    axes[0].set_ylabel(r"$\theta$ (rad)")
-    axes[1].set_ylabel(r"$\dot\theta$ (rad/s)")
-    axes[1].set_xlabel("time (s)")
-    axes[0].set_title(f"{n_plot} pendulum rollouts (random x0, random u)")
-    for ax in axes:
-        ax.grid(True)
-
-    plt.tight_layout()
-    plt.show()
-
+##################################################
+# MAIN
+##################################################
 
 if __name__ == "__main__":
-    main()
+
+    # initilize the parameters
+    params = {
+        "m": 1.0,      # mass
+        "l": 1.0,      # length
+        "b": 0.1,      # damping
+        "g": 9.81,     # gravity
+        "dt": 0.02,    # time step
+        "umax": 3.0,   # max torque
+        "K": 256,      # iLQR iterations
+        "eps": 1e-3,   # gradient mean sampling
+    }
+
+    # number of integration steps
+    T = 250
+
+    # initial state (downward at rest)
+    x0 = torch.tensor([0.0, 0.0])
+
+    # initialize CEM parameters
+    cem_params = CEMParams(
+        N=T,
+        dt=params["dt"],
+        B=256,
+        n_elite=32,
+        mu0=0.0,
+        sigma0=1.0,
+        sigma_min=0.01,
+        sigma_max=1.0,
+        iter=100
+    )
+    cem = CEM(cem_params)
+
+    
+
+
+
+
