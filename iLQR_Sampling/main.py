@@ -13,7 +13,7 @@ def main():
         "b": 0.1,
         "g": 9.81,
         "dt": 0.01,
-        "umax": 2.0,
+        "umax": 3.0,
     }
 
     B = 256          # number of rollouts
