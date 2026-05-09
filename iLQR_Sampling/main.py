@@ -4,8 +4,10 @@
 #
 ##
 
+import os
 import torch
 import math
+import numpy as np
 import pendulum
 import matplotlib.pyplot as plt
 from cost import *
@@ -55,11 +57,18 @@ def linearize_about_trajectory(X, U, dyn_params, ilqr_params):
     then ZOH-discretize over dt to get Ad_k, Bd_k for the perturbation map
         dx_{k+1} ~ Ad_k dx_k + Bd_k du_k.
 
+    The continuous-time Jacobians are computed either analytically
+    (ilqr_params["lin_method"] == "analytical") or via Gaussian-smoothing
+    sampling around (X[k], U[k]) (ilqr_params["lin_method"] == "sampling").
+
     Args:
         X:           (N+1, nx) nominal state trajectory
         U:           (N, nu) nominal control sequence
         dyn_params:  dynamics dict (m, l, b, g, dt)
-        ilqr_params: iLQR dict (unused; kept for API consistency)
+        ilqr_params: iLQR dict; reads
+                       "lin_method": "analytical" (default) or "sampling"
+                       "lin_K":      sample count for "sampling"
+                       "lin_eps":    perturbation scale for "sampling"
 
     Returns:
         Ad_list: (N, nx, nx)
@@ -68,12 +77,31 @@ def linearize_about_trajectory(X, U, dyn_params, ilqr_params):
     # use the first N states (the linearization points for each control step)
     X_lin = X[:-1]                                         # (N, nx)
 
-    # batched continuous Jacobians (treats time axis as the batch axis)
-    Ac_list = Ac(X_lin, U, dyn_params)                     # (N, nx, nx)
-    Bc_list = Bc(X_lin, U, dyn_params)                     # (N, nx, nu)
-    Cc_list = torch.zeros(Ac_list.shape[0], Ac_list.shape[1], 1,
-                          dtype=X.dtype, device=X.device)  # iLQR uses only the perturbation map
-                                                           # no need for Cc/Cd; pass zeros
+    method = ilqr_params.get("lin_method", "analytical")
+
+    if method == "analytical":
+        # batched analytical Jacobians (treats time axis as the batch axis)
+        Ac_list = Ac(X_lin, U, dyn_params)                 # (N, nx, nx)
+        Bc_list = Bc(X_lin, U, dyn_params)                 # (N, nx, nu)
+        Cc_list = torch.zeros(Ac_list.shape[0], Ac_list.shape[1], 1,
+                              dtype=X.dtype, device=X.device)  # iLQR uses only the perturbation map
+                                                               # no need for Cc/Cd; pass zeros
+
+    elif method == "sampling":
+        # sampling-based linearization (Gaussian smoothing on (xi, eta))
+        # linearize_sampling_based reads m,l,b,g from params plus K and eps,
+        # so merge the dynamics dict with the sampling knobs at call time
+        sampling_params = {**dyn_params,
+                           "K":   ilqr_params["lin_K"],
+                           "eps": ilqr_params["lin_eps"]}
+        Ac_list, Bc_list, _ = linearize_sampling_based(X_lin, U, sampling_params)
+        # discard sampled Cc; iLQR only uses the perturbation map
+        Cc_list = torch.zeros(Ac_list.shape[0], Ac_list.shape[1], 1,
+                              dtype=X.dtype, device=X.device)
+
+    else:
+        raise ValueError(
+            f"unknown lin_method={method!r}; expected 'analytical' or 'sampling'")
 
     # ZOH discretization
     Ad_list, Bd_list, _ = discretize_linear_system(Ac_list, Bc_list, Cc_list, dyn_params)
@@ -319,10 +347,15 @@ if __name__ == "__main__":
         "max_iter": 100,    # max outer iterations
         "tol": 1e-4,        # convergence tolerance on cost change
         "mu": 1.0,          # initial Levenberg-Marquardt regularization
-        "mu_min": 1e-6,     
-        "mu_max": 1e10,     
+        "mu_min": 1e-6,
+        "mu_max": 1e10,
         "mu_factor": 2.0,   # multiplicative up/down step on mu
         "alphas": [1.0, 0.75, 0.5, 0.25, 0.125, 0.06, 0.03],  # line search schedule
+        # linearization method: "analytical" or "sampling"
+        # "lin_method": "analytical",
+        "lin_method": "sampling",
+        "lin_K":      256,    # samples per linearization (sampling only)
+        "lin_eps":    1e-3,   # perturbation scale       (sampling only)
     }
 
     # initial state (downward at rest)
@@ -368,4 +401,16 @@ if __name__ == "__main__":
     axs[1, 1].set_yscale("log")
 
     fig.tight_layout()
+
+    # save outputs
+    results_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
+    os.makedirs(results_dir, exist_ok=True)
+
+    fig.savefig(os.path.join(results_dir, "ilqr_plot.png"), dpi=150)
+    np.savetxt(os.path.join(results_dir, "state.csv"), X.numpy(),
+               delimiter=",", header="theta,theta_dot", comments="")
+    np.savetxt(os.path.join(results_dir, "time.csv"), tspan.numpy(),
+               delimiter=",", header="t", comments="")
+    print(f"[iLQR] saved plot + state.csv + time.csv -> {results_dir}")
+
     plt.show()
