@@ -243,6 +243,7 @@ if __name__ == "__main__":
     # dynamics
     dyn = MJDynamics(MJDynamicsConfig(
         xml_path=os.path.join(here, "models", "cartpole.xml"),
+        # xml_path=os.path.join(here, "models", "cartpole_walls.xml"),
         sim_dt=0.01,
         u_lb=np.array([-100.0]),
         u_ub=np.array([ 100.0]),
@@ -309,6 +310,9 @@ if __name__ == "__main__":
                delimiter=",", header="cart_pos,pole_angle,cart_vel,pole_vel", comments="")
     np.savetxt(os.path.join(results_dir, "time.csv"), tspan,
                delimiter=",", header="t", comments="")
-    print(f"[iLQR] saved plot + state.csv + time.csv -> {results_dir}")
+    # record which XML was used so playback loads the matching model
+    with open(os.path.join(results_dir, "model.txt"), "w") as f:
+        f.write(os.path.basename(dyn.config.xml_path))
+    print(f"[iLQR] saved plot + state.csv + time.csv + model.txt -> {results_dir}")
 
     plt.show()

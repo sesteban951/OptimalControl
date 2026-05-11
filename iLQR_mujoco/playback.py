@@ -2,11 +2,6 @@
 #
 # Playback the iLQR-optimized trajectory in MuJoCo's passive viewer.
 #
-# Loads results/state.csv (cart_pos, pole_angle, cart_vel, pole_vel) and
-# results/time.csv, then drives data.qpos / data.qvel through each row and
-# calls viewer.sync() to refresh the 3D scene. Loops while the viewer window
-# is open. Space toggles pause; close the window to exit.
-#
 ##
 
 import os
@@ -24,8 +19,11 @@ def load_trajectory(results_dir):
 
 def main():
     here        = os.path.dirname(os.path.abspath(__file__))
-    xml_path    = os.path.join(here, "models", "cartpole.xml")
     results_dir = os.path.join(here, "results")
+    # load the XML name recorded by main.py (e.g. "cartpole.xml") and resolve under models/
+    with open(os.path.join(results_dir, "model.txt"), "r") as f:
+        xml_name = f.read().strip()
+    xml_path    = os.path.join(here, "models", xml_name)
 
     X, t = load_trajectory(results_dir)
     dt   = float(t[1] - t[0])
