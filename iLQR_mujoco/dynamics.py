@@ -125,8 +125,8 @@ class MJDynamics:
         # central directional derivative y_k ≈ [Ad | Bd] z_k
         Y = np.empty((K, nx), dtype=np.float64)
         for k in range(K):
-            f_p = self.f_disc(x + eps * xi[k], u + eps * eta[k])
-            f_m = self.f_disc(x - eps * xi[k], u - eps * eta[k])
+            f_p = self.f_disc(x + eps * xi[k], u + eps * eta[k], clip=False)
+            f_m = self.f_disc(x - eps * xi[k], u - eps * eta[k], clip=False)
             Y[k] = (f_p - f_m) / (2.0 * eps)
 
         # stacked perturbation Z
