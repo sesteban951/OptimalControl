@@ -12,11 +12,11 @@ import numpy as np
 #########################################################
 
 # quadratic weights on lifted state and control
-Q_diag = np.array([1.0, 5.0, 5.0, 0.1, 0.1])    # [cart_pos, cos, sin, cart_vel, pole_vel]
+Q_diag = np.array([1.0, 25.0, 25.0, 0.1, 0.1])  # [cart_pos, cos, sin, cart_vel, pole_vel]
 R_diag = np.array([0.0005])                     # control
 Q  = np.diag(Q_diag)                            # (5, 5)
 R  = np.diag(R_diag)                            # (1, 1)
-Qf = Q * 10.0                                   # terminal weight
+Qf = Q * 50.0                                   # terminal weight
 
 # target state: cart at origin, pole upright (theta=0), zero velocities
 x_des = np.array([0.0, 0.0, 0.0, 0.0])

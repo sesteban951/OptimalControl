@@ -273,11 +273,11 @@ if __name__ == "__main__":
         "mu_factor": 2.0,
         "alphas":    [1.0, 0.75, 0.5, 0.25, 0.125, 0.06, 0.03],
         # linearization method: "sampling" or "mujoco_fd"
-        # "linearize_method": "sampling",
-        "linearize_method": "mujoco_fd",
+        "linearize_method": "sampling",
+        # "linearize_method": "mujoco_fd",
         # sampling-based linearization knobs (consumed by dyn.linearize_sampling_based)
         "sampling_K":   128,
-        "sampling_eps": 1e-3,
+        "sampling_eps": 5e-2,
         "sampling_rng": np.random.default_rng(0),
         # mujoco FD linearization knobs (consumed by dyn.linearize_mujoco_fd)
         "fd_eps":      1e-6,
@@ -285,10 +285,12 @@ if __name__ == "__main__":
     }
 
     # initial state: pole-down at rest (qpos[1] = pi in our XML convention)
-    x0 = np.array([0.0, 0.0, 0.0, 0.0])
+    x0 = np.array([0.0, np.pi, 0.0, 0.0])
 
-    # initial control guess: small zero-mean noise
-    U_init = 20.0 * np.random.default_rng(1).standard_normal((ilqr_params["T"], dyn.nu))
+    # initial control guess: sinusoidal energy-pumping pattern (period ~0.5s)
+    _t_init = np.arange(ilqr_params["T"]) * dyn.dt
+    U_init = 80.0 * np.sin(2.0 * np.pi * 2.0 * _t_init)[:, None] \
+             * np.ones((1, dyn.nu))
 
     # solve
     X, U, J_hist = ilqr_solve(x0, U_init, dyn, ilqr_params)
