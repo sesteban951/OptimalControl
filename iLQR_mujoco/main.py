@@ -256,7 +256,8 @@ if __name__ == "__main__":
     # dynamics
     dyn = MJDynamics(MJDynamicsConfig(
         # xml_path=os.path.join(here, "models", "cartpole.xml"),
-        xml_path=os.path.join(here, "models", "cartpole_walls.xml"),
+        # xml_path=os.path.join(here, "models", "cartpole_walls.xml"),
+        xml_path=os.path.join(here, "models", "cartpole_walls_soft.xml"),
         sim_dt=0.01,
         u_lb=np.array([-100.0]),
         u_ub=np.array([ 100.0]),
@@ -280,7 +281,7 @@ if __name__ == "__main__":
         "sampling_eps": 5e-2,
         "sampling_rng": np.random.default_rng(0),
         # mujoco FD linearization knobs (consumed by dyn.linearize_mujoco_fd)
-        "fd_eps":      1e-6,
+        "fd_eps":      5e-2,
         "fd_centered": True,
     }
 
