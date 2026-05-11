@@ -19,17 +19,21 @@ from cost import (l_x, l_xx, l_u, l_uu, l_ux,
 
 def linearize_about_trajectory(X, U, dyn, ilqr_params):
     """
-    Sampling-based linearization at each knot point along the nominal trajectory.
+    Linearize the discrete dynamics at each knot point along the nominal trajectory.
 
     For k = 0..N-1, estimate (Ad_k, Bd_k) such that the perturbation map satisfies
         dx_{k+1} ≈ Ad_k dx_k + Bd_k du_k.
+
+    Method dispatched by ilqr_params["linearize_method"]:
+        "sampling"   -> dyn.linearize_sampling_based (reads "sampling_K", "sampling_eps",
+                                                      optional "sampling_reg", "sampling_rng")
+        "mujoco_fd"  -> dyn.linearize_mujoco_fd      (reads optional "fd_eps", "fd_centered")
 
     Args:
         X:           (N+1, nx) nominal state trajectory
         U:           (N, nu)   nominal control sequence
         dyn:         MJDynamics
-        ilqr_params: dict; passed through to dyn.linearize_sampling_based
-                       (reads "K", "eps", optional "reg", "rng")
+        ilqr_params: dict
     Returns:
         Ad_list: (N, nx, nx)
         Bd_list: (N, nx, nu)
@@ -37,10 +41,19 @@ def linearize_about_trajectory(X, U, dyn, ilqr_params):
     N      = U.shape[0]
     nx, nu = dyn.nx, dyn.nu
 
+    method = ilqr_params.get("linearize_method", "sampling")
+    if method == "sampling":
+        linearize = dyn.linearize_sampling_based
+    elif method == "mujoco_fd":
+        linearize = dyn.linearize_mujoco_fd
+    else:
+        raise ValueError(f"unknown linearize_method '{method}'; "
+                         f"expected 'sampling' or 'mujoco_fd'")
+
     Ad_list = np.empty((N, nx, nx))
     Bd_list = np.empty((N, nx, nu))
     for k in range(N):
-        Ad, Bd = dyn.linearize_sampling_based(X[k], U[k], ilqr_params)
+        Ad, Bd = linearize(X[k], U[k], ilqr_params)
         Ad_list[k] = Ad
         Bd_list[k] = Bd
     return Ad_list, Bd_list
@@ -242,8 +255,8 @@ if __name__ == "__main__":
 
     # dynamics
     dyn = MJDynamics(MJDynamicsConfig(
-        xml_path=os.path.join(here, "models", "cartpole.xml"),
-        # xml_path=os.path.join(here, "models", "cartpole_walls.xml"),
+        # xml_path=os.path.join(here, "models", "cartpole.xml"),
+        xml_path=os.path.join(here, "models", "cartpole_walls.xml"),
         sim_dt=0.01,
         u_lb=np.array([-100.0]),
         u_ub=np.array([ 100.0]),
@@ -253,20 +266,26 @@ if __name__ == "__main__":
     ilqr_params = {
         "T":         500,
         "max_iter":  250,
-        "tol":       1e-4,
+        "tol":       1e-6,
         "mu":        1.0,
         "mu_min":    1e-6,
         "mu_max":    1e10,
         "mu_factor": 2.0,
         "alphas":    [1.0, 0.75, 0.5, 0.25, 0.125, 0.06, 0.03],
+        # linearization method: "sampling" or "mujoco_fd"
+        # "linearize_method": "sampling",
+        "linearize_method": "mujoco_fd",
         # sampling-based linearization knobs (consumed by dyn.linearize_sampling_based)
-        "K":         64,
-        "eps":       1e-3,
-        "rng":       np.random.default_rng(0),
+        "sampling_K":   128,
+        "sampling_eps": 1e-3,
+        "sampling_rng": np.random.default_rng(0),
+        # mujoco FD linearization knobs (consumed by dyn.linearize_mujoco_fd)
+        "fd_eps":      1e-6,
+        "fd_centered": True,
     }
 
     # initial state: pole-down at rest (qpos[1] = pi in our XML convention)
-    x0 = np.array([0.0, np.pi, 0.0, 0.0])
+    x0 = np.array([0.0, 0.0, 0.0, 0.0])
 
     # initial control guess: small zero-mean noise
     U_init = 20.0 * np.random.default_rng(1).standard_normal((ilqr_params["T"], dyn.nu))

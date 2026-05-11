@@ -83,6 +83,34 @@ class MJDynamics:
 
         return self.get_state()
 
+    # MuJoCo built-in finite-difference linearization of the discrete map
+    def linearize_mujoco_fd(self, x, u, ilqr_params):
+        """
+        Estimate (Ad, Bd) for the discrete-time linearization of f_disc at (x, u)
+        using mujoco.mjd_transitionFD.
+
+        Args:
+            x:           (nx,) linearization state
+            u:           (nu,) linearization control
+            ilqr_params: dict; reads
+                           "fd_eps":      finite-difference step  (optional, default 1e-6)
+                           "fd_centered": centered differences    (optional, default True)
+        Returns:
+            Ad: (nx, nx)
+            Bd: (nx, nu)
+        """
+        eps      = ilqr_params.get("fd_eps", 1e-6)
+        centered = ilqr_params.get("fd_centered", True)
+
+        # set state + control on data and refresh
+        self.set_state(x)
+        self.data.ctrl[:] = np.asarray(u, dtype=np.float64)
+
+        Ad = np.zeros((self.nx, self.nx), dtype=np.float64)
+        Bd = np.zeros((self.nx, self.nu), dtype=np.float64)
+        mujoco.mjd_transitionFD(self.model, self.data, eps, centered, Ad, Bd, None, None)
+        return Ad, Bd
+
     # sampling-based linearization of the discrete map
     def linearize_sampling_based(self, x, u, ilqr_params):
         """
@@ -100,10 +128,10 @@ class MJDynamics:
             x:           (nx,) linearization state
             u:           (nu,) linearization control
             ilqr_params: dict; reads
-                           "K":   number of paired samples
-                           "eps": perturbation scale
-                           "reg": ridge on the gram matrix     (optional, default 1e-8)
-                           "rng": np.random.Generator          (optional, default fresh)
+                           "sampling_K":   number of paired samples
+                           "sampling_eps": perturbation scale
+                           "sampling_reg": ridge on the gram matrix (optional, default 1e-8)
+                           "sampling_rng": np.random.Generator      (optional, default fresh)
         Returns:
             Ad: (nx, nx)
             Bd: (nx, nu)
@@ -111,10 +139,10 @@ class MJDynamics:
         nx, nu = self.nx, self.nu
 
         # sampling knobs from ilqr_params
-        K   = ilqr_params["K"]
-        eps = ilqr_params["eps"]
-        reg = ilqr_params.get("reg", 1e-8)
-        rng = ilqr_params.get("rng", None)
+        K   = ilqr_params["sampling_K"]
+        eps = ilqr_params["sampling_eps"]
+        reg = ilqr_params.get("sampling_reg", 1e-8)
+        rng = ilqr_params.get("sampling_rng", None)
         if rng is None:
             rng = np.random.default_rng()
 
