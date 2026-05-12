@@ -54,21 +54,23 @@ def boxqp(H, q, lb, ub, x0=None,
     free = np.ones(n, dtype=bool)
 
     for it in range(max_iter):
-        g = q + H @ x
+        # gradient
+        grad = q + H @ x  
 
         # active-set identification (Tassa eq 15): clamped iff at bound AND gradient pushes outward
-        at_lb   = (x - lb <= bound_tol) & (g > 0.0)
-        at_ub   = (ub - x <= bound_tol) & (g < 0.0)
+        at_lb   = (x - lb <= bound_tol) & (grad > 0.0)
+        at_ub   = (ub - x <= bound_tol) & (grad < 0.0)
         clamped = at_lb | at_ub
         free    = ~clamped
-        nf      = int(free.sum())
+        nf      = int(free.sum())  # number of free variables
 
         # all clamped: stationary on the boundary
         if nf == 0:
             return x, free, None, it, "ok"
 
-        gf = g[free]
-        if np.linalg.norm(gf, np.inf) < tol:
+        # partition the gradient into free and clamped components
+        grad_free = grad[free]
+        if np.linalg.norm(grad_free, np.inf) < tol:
             Hff = H[np.ix_(free, free)]
             try:
                 L_ff = np.linalg.cholesky(Hff)
@@ -82,22 +84,27 @@ def boxqp(H, q, lb, ub, x0=None,
             L_ff = np.linalg.cholesky(Hff)
         except np.linalg.LinAlgError:
             return x, free, None, it, "not_descent"
+        
+        # delta_xf = - H_ff^{-1} g_f  via the Cholesky factorization
+        z   = np.linalg.solve(L_ff,  -grad_free)
+        dxf = np.linalg.solve(L_ff.T, z)
 
-        z   = np.linalg.solve(L_ff,    -gf)
-        dxf = np.linalg.solve(L_ff.T,   z)
+        # assemble the full step, with zeros in the clamped dimensions, eq (17)
+        dx       = np.zeros(n)
+        dx[free] = dxf
 
-        dx          = np.zeros(n)
-        dx[free]    = dxf
-
-        # projected backtracking line search (Tassa eq 19)
+        # projected backtracking line search with Armijo (Tassa eq 19)
         f0    = 0.5 * x @ H @ x + q @ x
         alpha = 1.0
         accepted = False
         while alpha > min_step:
+            # compute change in descent
             x_new = np.clip(x + alpha * dx, lb, ub)
             f_new = 0.5 * x_new @ H @ x_new + q @ x_new
             df    = f0 - f_new
-            denom = g @ (x - x_new)            # > 0 for a true descent projection
+            denom = grad @ (x - x_new)            # > 0 for a true descent projection
+
+            # check if Armijo satisfied
             if denom > 0.0 and df > armijo_c * denom:
                 x = x_new
                 accepted = True

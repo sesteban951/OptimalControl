@@ -349,7 +349,7 @@ if __name__ == "__main__":
         "linearize_method": "sampling",
         # "linearize_method": "mujoco_fd",
         # sampling-based linearization knobs (consumed by dyn.linearize_sampling_based)
-        "sampling_K":   128,
+        "sampling_K":   256,
         "sampling_eps": 5e-2,
         "sampling_rng": np.random.default_rng(0),
         # mujoco FD linearization knobs (consumed by dyn.linearize_mujoco_fd)
