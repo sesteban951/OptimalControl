@@ -1,4 +1,4 @@
-import mujoco
+import mujoco  # type: ignore
 import numpy as np
 from dataclasses import dataclass
 
