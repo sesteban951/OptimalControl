@@ -1,0 +1,110 @@
+"""
+Box-constrained quadratic program solver.
+
+Solves
+    min   0.5 * x^T H x + q^T x
+    s.t.  lb <= x <= ub                                     (elementwise)
+
+via the projected-Newton active-set algorithm
+(Bertsekas 1982; Tassa, Mansard & Todorov 2014, Algorithm I).
+
+Returns the optimum x*, the free-index mask f at x*, and the Cholesky
+factor of H_{ff} so that callers can compute the feedback gain
+    K_f = - H_{ff}^{-1} Q_{ux,f}
+without re-factorizing.
+"""
+
+import numpy as np
+
+
+def boxqp(H, q, lb, ub, x0=None,
+          tol=1e-8, max_iter=100,
+          armijo_c=0.1, step_dec=0.6, min_step=1e-22):
+    """
+    Args:
+        H:        (n, n) symmetric (assumed PSD on the free subspace)
+        q:        (n,)
+        lb, ub:   (n,) box bounds, lb <= ub elementwise
+        x0:       optional warm-start; clipped into [lb, ub]
+        tol:      stop when ||g_f||_inf < tol  (g_f = free-subspace gradient)
+        max_iter: outer-iteration cap
+        armijo_c, step_dec, min_step: backtracking-line-search params
+
+    Returns:
+        x:        (n,) optimum
+        free:     (n,) bool mask of un-clamped indices at x
+        L_ff:     (nf, nf) lower-triangular Cholesky of H[free, free],
+                  or None if nf == 0 / not PD
+        n_iter:   outer iterations used
+        status:   "ok" | "not_descent" | "tiny_step" | "max_iter"
+    """
+    n  = H.shape[0]
+    lb = np.asarray(lb, dtype=float)
+    ub = np.asarray(ub, dtype=float)
+
+    if x0 is None:
+        x = np.clip(np.zeros(n), lb, ub)
+    else:
+        x = np.clip(np.asarray(x0, dtype=float).copy(), lb, ub)
+
+    # tolerance for "x is at a bound" (relative to box width, with floor)
+    bound_tol = 1e-12 * np.maximum(1.0, np.abs(ub - lb))
+
+    L_ff = None
+    free = np.ones(n, dtype=bool)
+
+    for it in range(max_iter):
+        g = q + H @ x
+
+        # active-set identification (Tassa eq 15): clamped iff at bound AND gradient pushes outward
+        at_lb   = (x - lb <= bound_tol) & (g > 0.0)
+        at_ub   = (ub - x <= bound_tol) & (g < 0.0)
+        clamped = at_lb | at_ub
+        free    = ~clamped
+        nf      = int(free.sum())
+
+        # all clamped: stationary on the boundary
+        if nf == 0:
+            return x, free, None, it, "ok"
+
+        gf = g[free]
+        if np.linalg.norm(gf, np.inf) < tol:
+            Hff = H[np.ix_(free, free)]
+            try:
+                L_ff = np.linalg.cholesky(Hff)
+            except np.linalg.LinAlgError:
+                L_ff = None
+            return x, free, L_ff, it, "ok"
+
+        # Newton step in the free subspace:  H_ff dxf = -g_f
+        Hff = H[np.ix_(free, free)]
+        try:
+            L_ff = np.linalg.cholesky(Hff)
+        except np.linalg.LinAlgError:
+            return x, free, None, it, "not_descent"
+
+        z   = np.linalg.solve(L_ff,    -gf)
+        dxf = np.linalg.solve(L_ff.T,   z)
+
+        dx          = np.zeros(n)
+        dx[free]    = dxf
+
+        # projected backtracking line search (Tassa eq 19)
+        f0    = 0.5 * x @ H @ x + q @ x
+        alpha = 1.0
+        accepted = False
+        while alpha > min_step:
+            x_new = np.clip(x + alpha * dx, lb, ub)
+            f_new = 0.5 * x_new @ H @ x_new + q @ x_new
+            df    = f0 - f_new
+            denom = g @ (x - x_new)            # > 0 for a true descent projection
+            if denom > 0.0 and df > armijo_c * denom:
+                x = x_new
+                accepted = True
+                break
+            alpha *= step_dec
+
+        if not accepted:
+            return x, free, L_ff, it, "tiny_step"
+
+    return x, free, L_ff, max_iter, "max_iter"

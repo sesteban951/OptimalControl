@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 from dynamics import MJDynamics, MJDynamicsConfig
 from cost import (l_x, l_xx, l_u, l_uu, l_ux,
                   lf_x, lf_xx, cost_eval)
+from boxqp import boxqp
 
 
 ##################################################
@@ -59,28 +60,45 @@ def linearize_about_trajectory(X, U, dyn, ilqr_params):
     return Ad_list, Bd_list
 
 
-def backward_pass(X, U, Ad_list, Bd_list, mu):
+def backward_pass(X, U, Ad_list, Bd_list, mu, dyn):
     """
-    Riccati-style backward sweep with Levenberg-Marquardt regularization.
+    Riccati-style backward sweep with Levenberg-Marquardt regularization and
+    box-constrained control updates (Tassa, Mansard & Todorov 2014).
 
     For k = N-1..0, build the local Q-function around (X[k], U[k]) using nominal
     cost derivatives and the perturbation dynamics dx_{k+1} = Ad_k dx_k + Bd_k du_k,
     then compute feedforward / feedback gains
-        du_k = k_ff[k] + K_fb[k] dx_k.
+        du_k = k_ff[k] + K_fb[k] dx_k
+    by solving the box-constrained QP
+        min   0.5 * du^T Quu_reg du + Qu^T du
+        s.t.  u_lb - U[k] <= du <= u_ub - U[k].
+    The feedback gain rows for clamped controls are nullified (Tassa III-C.2),
+    and the free-row gains use the reduced Hessian:
+        K_fb[k][f, :] = -Quu_reg[f, f]^{-1} Qux[f, :].
 
     Args:
-        X, U:           nominal trajectory and controls
+        X, U:             nominal trajectory and controls
         Ad_list, Bd_list: per-step Jacobians from linearize_about_trajectory
-        mu:             scalar LM regularization on Quu
+        mu:               scalar LM regularization on Quu
+        dyn:              MJDynamics (used for u_lb, u_ub)
+
+    Also accumulates the quadratic model of expected cost change along the
+    constrained feedforward step, used by the Armijo line search:
+        dJ_expected(alpha) = alpha * dV1 + alpha^2 * dV2
+        dV1 = sum_k  k_ff_k^T Q_u_k        (< 0 for a descent direction)
+        dV2 = sum_k  0.5 * k_ff_k^T Q_uu_k k_ff_k   (unregularized Quu)
 
     Returns:
         k_ff_seq: (N, nu)
         K_fb_seq: (N, nu, nx)
-        success:  bool  (False if any Quu_reg fails Cholesky → caller bumps mu)
+        dV1, dV2: floats  (quadratic model coefficients)
+        success:  bool    (False if any QP free-subspace Hessian fails Cholesky)
     """
     N      = U.shape[0]
     nx     = X.shape[1]
     nu     = U.shape[1]
+    u_lb   = dyn.u_lb
+    u_ub   = dyn.u_ub
 
     # bulk-evaluate cost derivatives along the nominal trajectory
     X_stage = X[:-1]              # (N, nx)
@@ -99,6 +117,11 @@ def backward_pass(X, U, Ad_list, Bd_list, mu):
 
     mu_I = mu * np.eye(nu)
 
+    dV1 = 0.0
+    dV2 = 0.0
+
+    warm = None    # warm-start the box-QP from the previous (k+1) solution
+
     for k in range(N - 1, -1, -1):
         Ad, Bd = Ad_list[k], Bd_list[k]
         lx,  lu  = lx_all[k],  lu_all[k]
@@ -112,25 +135,41 @@ def backward_pass(X, U, Ad_list, Bd_list, mu):
         Qux = lux + Bd.T @ Vxx @ Ad
         Quu = luu + Bd.T @ Vxx @ Bd
 
-        # regularize Quu and check positive-definiteness via Cholesky
+        # Tikhonov-regularize Quu for the QP Hessian
         Quu_reg = Quu + mu_I
-        try:
-            np.linalg.cholesky(Quu_reg)
-        except np.linalg.LinAlgError:
-            return k_ff_seq, K_fb_seq, False
 
-        # gains
-        k_ff = -np.linalg.solve(Quu_reg, Qu)            # (nu,)
-        K_fb = -np.linalg.solve(Quu_reg, Qux)           # (nu, nx)
+        # box-constrained QP for the feedforward step
+        #     min  0.5 du^T Quu_reg du + Qu^T du   s.t.   u_lb - U[k] <= du <= u_ub - U[k]
+        lb_k = u_lb - U[k]
+        ub_k = u_ub - U[k]
+        k_ff, free, L_ff, _, status = boxqp(Quu_reg, Qu, lb_k, ub_k, x0=warm)
+        warm = k_ff
+
+        if status == "not_descent":
+            # Quu_reg lost PD on the free subspace -> caller bumps mu
+            return k_ff_seq, K_fb_seq, 0.0, 0.0, False
+
+        # feedback: zero rows for clamped controls, reduced-Hessian solve for free rows
+        K_fb = np.zeros((nu, nx))
+        if L_ff is not None and free.any():
+            Qux_f = Qux[free]                                   # (nf, nx)
+            z     = np.linalg.solve(L_ff,    Qux_f)
+            y     = np.linalg.solve(L_ff.T,  z)                 # Quu_reg[f,f]^{-1} Qux[f,:]
+            K_fb[free] = -y
+
         k_ff_seq[k] = k_ff
         K_fb_seq[k] = K_fb
+
+        # quadratic model of expected cost change (Tassa convention: unregularized Quu)
+        dV1 += float(k_ff @ Qu)
+        dV2 += 0.5 * float(k_ff @ Quu @ k_ff)
 
         # value-function update (general form, doesn't assume optimal gains)
         Vx  = Qx  + K_fb.T @ Quu_reg @ k_ff + K_fb.T @ Qu  + Qux.T @ k_ff
         Vxx = Qxx + K_fb.T @ Quu_reg @ K_fb + K_fb.T @ Qux + Qux.T @ K_fb
         Vxx = 0.5 * (Vxx + Vxx.T)                       # symmetrize
 
-    return k_ff_seq, K_fb_seq, True
+    return k_ff_seq, K_fb_seq, dV1, dV2, True
 
 
 def forward_pass(x0, X_nom, U_nom, k_ff, K_fb, alpha, dyn):
@@ -177,13 +216,17 @@ def ilqr_solve(x0, U_init, dyn, ilqr_params):
     N      = U_init.shape[0]
     nx, nu = dyn.nx, dyn.nu
 
-    max_iter  = ilqr_params["max_iter"]
-    tol       = ilqr_params["tol"]
-    mu        = ilqr_params["mu"]
-    mu_min    = ilqr_params["mu_min"]
-    mu_max    = ilqr_params["mu_max"]
-    mu_factor = ilqr_params["mu_factor"]
-    alphas    = ilqr_params["alphas"]
+    max_iter   = ilqr_params["max_iter"]
+    tol        = ilqr_params["tol"]
+    mu         = ilqr_params["mu"]
+    mu_min     = ilqr_params["mu_min"]
+    mu_max     = ilqr_params["mu_max"]
+    mu_factor  = ilqr_params["mu_factor"]
+    # geometric backtracking line search params
+    alpha_init = ilqr_params.get("alpha_init", 1.0)
+    alpha_beta = ilqr_params.get("alpha_beta", 0.5)
+    alpha_min  = ilqr_params.get("alpha_min",  1e-4)
+    c1         = ilqr_params.get("armijo_c",   1e-4)  # Armijo sufficient-decrease constant
 
     # initial open-loop rollout of U_init (with clipping)
     X = np.empty((N + 1, nx)); X[0] = x0
@@ -202,7 +245,7 @@ def ilqr_solve(x0, U_init, dyn, ilqr_params):
     while it < max_iter:
         # linearize + backward pass
         Ad_list, Bd_list = linearize_about_trajectory(X, U, dyn, ilqr_params)
-        k_ff, K_fb, ok   = backward_pass(X, U, Ad_list, Bd_list, mu)
+        k_ff, K_fb, dV1, dV2, ok = backward_pass(X, U, Ad_list, Bd_list, mu, dyn)
 
         # backward pass failed -> bump mu and retry (no iteration bump)
         if not ok:
@@ -213,18 +256,36 @@ def ilqr_solve(x0, U_init, dyn, ilqr_params):
                 break
             continue
 
-        # line search: accept the first alpha that improves cost
-        accepted   = False
-        alpha_used = None
-        dJ         = 0.0
-        for a in alphas:
+        # Armijo line search with geometric backtracking:
+        #   start at alpha = alpha_init; multiply by alpha_beta on each rejection;
+        #   stop when alpha < alpha_min (-> reject this backward pass, bump mu).
+        # Accept iff
+        #   E(a) = -(a*dV1 + a^2*dV2) > 0    AND    (J - J_try) >= c1 * E(a).
+        accepted     = False
+        alpha_used   = None
+        dJ           = 0.0
+        z_used       = 0.0
+        exp_red_used = 0.0
+        a            = alpha_init
+        while a >= alpha_min:
+            exp_red = -(a * dV1 + a * a * dV2)   # expected reduction (positive = descent)
+            if exp_red <= 0.0:
+                # quadratic model predicts non-descent at this alpha; backtrack
+                # (E(a) is concave with roots at 0 and -dV1/dV2, so smaller a
+                #  can recover E > 0)
+                a *= alpha_beta
+                continue
             X_try, U_try, J_try = forward_pass(x0, X, U, k_ff, K_fb, a, dyn)
-            if float(J_try) < float(J):
-                dJ = float(J) - float(J_try)
-                X, U, J    = X_try, U_try, J_try
-                accepted   = True
-                alpha_used = a
+            dJ_actual = float(J) - float(J_try)
+            if dJ_actual >= c1 * exp_red:
+                z_used       = dJ_actual / exp_red
+                exp_red_used = exp_red
+                dJ           = dJ_actual
+                X, U, J      = X_try, U_try, J_try
+                accepted     = True
+                alpha_used   = a
                 break
+            a *= alpha_beta
 
         # good step: decrease mu, count iteration, log, check convergence
         if accepted:
@@ -232,14 +293,18 @@ def ilqr_solve(x0, U_init, dyn, ilqr_params):
             mu = max(mu / mu_factor, mu_min)
             J_hist.append(float(J))
             print(f"[iLQR] iter {it:3d}: J={float(J):.4f}  dJ={dJ:.3e}  "
-                  f"alpha={alpha_used:.4f}  mu={mu:.2e}")
-            if abs(dJ) < tol:
-                print(f"[iLQR] converged: |dJ|={abs(dJ):.2e} < tol={tol:.2e}")
+                  f"alpha={alpha_used:.4f}  z={z_used:.2f}  "
+                  f"E={exp_red_used:.3e}  mu={mu:.2e}")
+            # convergence on either actual decrease or expected reduction
+            if abs(dJ) < tol or (exp_red_used > 0.0 and exp_red_used < tol):
+                print(f"[iLQR] converged: |dJ|={abs(dJ):.2e}, "
+                      f"E={exp_red_used:.2e} < tol={tol:.2e}")
                 break
         # bad step: increase mu and retry (no iteration bump)
         else:
             mu = min(mu * mu_factor, mu_max)
-            print(f"[iLQR] iter {it:3d}: no improvement, mu -> {mu:.2e}")
+            print(f"[iLQR] iter {it:3d}: line search failed "
+                  f"(dV1={dV1:.2e}, dV2={dV2:.2e}), mu -> {mu:.2e}")
             if mu >= mu_max:
                 print(f"[iLQR] mu hit mu_max={mu_max:.2e}; stopping.")
                 break
@@ -268,14 +333,18 @@ if __name__ == "__main__":
 
     # iLQR parameters
     ilqr_params = {
-        "T":         400,
+        "T":         450,
         "max_iter":  250,
-        "tol":       1e-6,
+        "tol":       1e-3,
         "mu":        1.0,
         "mu_min":    1e-6,
         "mu_max":    1e10,
         "mu_factor": 2.0,
-        "alphas":    [1.0, 0.75, 0.5, 0.25, 0.125, 0.06, 0.03],
+        # geometric backtracking line search
+        "alpha_init": 1.0,
+        "alpha_beta": 0.5,
+        "alpha_min":  1e-4,
+        "armijo_c":   1e-4,
         # linearization method: "sampling" or "mujoco_fd"
         "linearize_method": "sampling",
         # "linearize_method": "mujoco_fd",
