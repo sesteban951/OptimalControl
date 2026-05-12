@@ -197,12 +197,14 @@ def ilqr_solve(x0, U_init, dyn, ilqr_params):
     J_hist = [float(J)]
     print(f"[iLQR] iter   0: J={float(J):.4f}")
 
-    for it in range(1, max_iter + 1):
+    # main iLQR loop
+    it = 0
+    while it < max_iter:
         # linearize + backward pass
         Ad_list, Bd_list = linearize_about_trajectory(X, U, dyn, ilqr_params)
         k_ff, K_fb, ok   = backward_pass(X, U, Ad_list, Bd_list, mu)
 
-        # backward pass failed -> bump mu and retry
+        # backward pass failed -> bump mu and retry (no iteration bump)
         if not ok:
             mu = min(mu * mu_factor, mu_max)
             print(f"[iLQR] iter {it:3d}: backward pass failed, mu -> {mu:.2e}")
@@ -224,8 +226,9 @@ def ilqr_solve(x0, U_init, dyn, ilqr_params):
                 alpha_used = a
                 break
 
-        # good step: decrease mu, log, check convergence
+        # good step: decrease mu, count iteration, log, check convergence
         if accepted:
+            it += 1
             mu = max(mu / mu_factor, mu_min)
             J_hist.append(float(J))
             print(f"[iLQR] iter {it:3d}: J={float(J):.4f}  dJ={dJ:.3e}  "
@@ -233,7 +236,7 @@ def ilqr_solve(x0, U_init, dyn, ilqr_params):
             if abs(dJ) < tol:
                 print(f"[iLQR] converged: |dJ|={abs(dJ):.2e} < tol={tol:.2e}")
                 break
-        # bad step: increase mu and retry (without incrementing iteration count)
+        # bad step: increase mu and retry (no iteration bump)
         else:
             mu = min(mu * mu_factor, mu_max)
             print(f"[iLQR] iter {it:3d}: no improvement, mu -> {mu:.2e}")
@@ -265,7 +268,7 @@ if __name__ == "__main__":
 
     # iLQR parameters
     ilqr_params = {
-        "T":         500,
+        "T":         400,
         "max_iter":  250,
         "tol":       1e-6,
         "mu":        1.0,
