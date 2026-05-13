@@ -333,7 +333,7 @@ if __name__ == "__main__":
 
     # iLQR parameters
     ilqr_params = {
-        "T":         450,
+        "T":         400,
         "max_iter":  250,
         "tol":       1e-3,
         "mu":        1.0,

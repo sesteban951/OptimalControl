@@ -26,7 +26,6 @@ def main():
     xml_path    = os.path.join(here, "models", xml_name)
 
     X, t = load_trajectory(results_dir)
-    dt   = float(t[1] - t[0])
     N    = len(X)
 
     model = mujoco.MjModel.from_xml_path(xml_path)
@@ -37,24 +36,45 @@ def main():
         f"expected state width {2*nq} (=[qpos; qvel]); got {X.shape[1]}"
     )
 
-    with mujoco.viewer.launch_passive(model, data) as viewer:
+    # wall-clock-driven playback at ~50 Hz, robust to any (uniform or non-uniform)
+    # solver dt: at each display tick we look up the closest sample to the current
+    # simulated time.
+    target_fps   = 50.0
+    frame_period = 1.0 / target_fps
+    sim_t0       = float(t[0])
+    sim_total    = float(t[-1] - t[0])
+
+    with mujoco.viewer.launch_passive(model, data,
+                                      show_left_ui=False,
+                                      show_right_ui=False) as viewer:
         while viewer.is_running():
-            for k in range(N):
-                if not viewer.is_running():
-                    break
-                t0 = time.perf_counter()
+            wall0 = time.perf_counter()
+            while viewer.is_running():
+                wall_t = time.perf_counter() - wall0
+                if wall_t > sim_total:
+                    break                                         # finished this playback pass
+                sim_t = sim_t0 + wall_t
+                k     = min(int(np.searchsorted(t, sim_t)), N - 1)
 
                 # set state from CSV row and refresh derived quantities
                 data.qpos[:] = X[k, :nq]
                 data.qvel[:] = X[k, nq:]
                 mujoco.mj_forward(model, data)
 
+                # top-left "time = X.XX s" overlay (built-in mjr_overlay text).
+                # NB: this `font` arg is mjtFont (NORMAL / SHADOW / BIG), not mjtFontScale;
+                # the overall scale is fixed by the MjrContext the viewer created internally.
+                viewer.set_texts((mujoco.mjtFont.mjFONT_BIG,
+                                  mujoco.mjtGridPos.mjGRID_TOPLEFT,
+                                  f"time = {float(t[k]):.2f} s", None))
+
                 viewer.sync()
 
-                # sleep to keep playback at real-time (relative to dt)
-                elapsed = time.perf_counter() - t0
-                if elapsed < dt:
-                    time.sleep(dt - elapsed)
+                # pace to ~target_fps in wall-clock time
+                target_wall = wall0 + wall_t + frame_period
+                sleep_for   = target_wall - time.perf_counter()
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
 
 
 if __name__ == "__main__":
