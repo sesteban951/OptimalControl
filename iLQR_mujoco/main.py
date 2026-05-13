@@ -82,17 +82,17 @@ def backward_pass(X, U, Ad_list, Bd_list, mu, dyn):
         mu:               scalar LM regularization on Quu
         dyn:              MJDynamics (used for u_lb, u_ub)
 
-    Also accumulates the quadratic model of expected cost change along the
-    constrained feedforward step, used by the Armijo line search:
-        dJ_expected(alpha) = alpha * dV1 + alpha^2 * dV2
-        dV1 = sum_k  k_ff_k^T Q_u_k        (< 0 for a descent direction)
-        dV2 = sum_k  0.5 * k_ff_k^T Q_uu_k k_ff_k   (unregularized Quu)
+    Also accumulates the first-order directional derivative of the trajectory
+    cost along the iLQR search direction, used by the classic Armijo test
+    in the outer line search:
+        dV1 = sum_k  k_ff_k^T Q_u_k     (= dJ_model/dalpha at alpha=0,
+                                          < 0 for a descent direction)
 
     Returns:
         k_ff_seq: (N, nu)
         K_fb_seq: (N, nu, nx)
-        dV1, dV2: floats  (quadratic model coefficients)
-        success:  bool    (False if any QP free-subspace Hessian fails Cholesky)
+        dV1:      float   (first-order directional derivative along k_ff)
+        success:  bool    (False if any QP did not converge to a stationary point)
     """
     N      = U.shape[0]
     nx     = X.shape[1]
@@ -118,10 +118,9 @@ def backward_pass(X, U, Ad_list, Bd_list, mu, dyn):
     mu_I = mu * np.eye(nu)
 
     dV1 = 0.0
-    dV2 = 0.0
 
-    warm = None    # warm-start the box-QP from the previous (k+1) solution
-
+    # main backwards pass, computing the optimal feedforward k_ff and feedback K_fb at each step
+    warm = None
     for k in range(N - 1, -1, -1):
         Ad, Bd = Ad_list[k], Bd_list[k]
         lx,  lu  = lx_all[k],  lu_all[k]
@@ -145,9 +144,11 @@ def backward_pass(X, U, Ad_list, Bd_list, mu, dyn):
         k_ff, free, L_ff, _, status = boxqp(Quu_reg, Qu, lb_k, ub_k, x0=warm)
         warm = k_ff
 
-        if status == "not_descent":
-            # Quu_reg lost PD on the free subspace -> caller bumps mu
-            return k_ff_seq, K_fb_seq, 0.0, 0.0, False
+        if status != "ok":
+            # QP did not reach a stationary point (not_descent / tiny_step / max_iter)
+            # -> caller bumps mu and retries; using a sub-optimal k_ff would corrupt
+            # dV1 and the value-function update
+            return k_ff_seq, K_fb_seq, 0.0, False
 
         # feedback: zero rows for clamped controls, reduced-Hessian solve for free rows
         K_fb = np.zeros((nu, nx))
@@ -160,16 +161,15 @@ def backward_pass(X, U, Ad_list, Bd_list, mu, dyn):
         k_ff_seq[k] = k_ff
         K_fb_seq[k] = K_fb
 
-        # quadratic model of expected cost change (Tassa convention: unregularized Quu)
+        # first-order directional derivative of trajectory cost along k_ff
         dV1 += float(k_ff @ Qu)
-        dV2 += 0.5 * float(k_ff @ Quu @ k_ff)
 
         # value-function update (general form, doesn't assume optimal gains)
         Vx  = Qx  + K_fb.T @ Quu_reg @ k_ff + K_fb.T @ Qu  + Qux.T @ k_ff
         Vxx = Qxx + K_fb.T @ Quu_reg @ K_fb + K_fb.T @ Qux + Qux.T @ K_fb
         Vxx = 0.5 * (Vxx + Vxx.T)                       # symmetrize
 
-    return k_ff_seq, K_fb_seq, dV1, dV2, True
+    return k_ff_seq, K_fb_seq, dV1, True
 
 
 def forward_pass(x0, X_nom, U_nom, k_ff, K_fb, alpha, dyn):
@@ -245,7 +245,7 @@ def ilqr_solve(x0, U_init, dyn, ilqr_params):
     while it < max_iter:
         # linearize + backward pass
         Ad_list, Bd_list = linearize_about_trajectory(X, U, dyn, ilqr_params)
-        k_ff, K_fb, dV1, dV2, ok = backward_pass(X, U, Ad_list, Bd_list, mu, dyn)
+        k_ff, K_fb, dV1, ok = backward_pass(X, U, Ad_list, Bd_list, mu, dyn)
 
         # backward pass failed -> bump mu and retry (no iteration bump)
         if not ok:
@@ -256,25 +256,27 @@ def ilqr_solve(x0, U_init, dyn, ilqr_params):
                 break
             continue
 
-        # Armijo line search with geometric backtracking:
+        # Classic Armijo line search with geometric backtracking:
         #   start at alpha = alpha_init; multiply by alpha_beta on each rejection;
         #   stop when alpha < alpha_min (-> reject this backward pass, bump mu).
-        # Accept iff
-        #   E(a) = -(a*dV1 + a^2*dV2) > 0    AND    (J - J_try) >= c1 * E(a).
+        # First-order predicted reduction along the iLQR search direction:
+        #   E(a) = -a * dV1,   with dV1 = sum_k k_ff_k^T Q_u_k  (= dJ/da at a=0).
+        # Accept iff   (J - J_try) >= c1 * E(a).
         accepted     = False
         alpha_used   = None
         dJ           = 0.0
         z_used       = 0.0
         exp_red_used = 0.0
-        a            = alpha_init
+
+        if dV1 >= 0.0:
+            # search direction is not a descent direction; bail out of the line search
+            # so the outer loop bumps mu (Quu_reg likely lost positive definiteness)
+            a = alpha_min - 1.0   # force the while loop to skip
+        else:
+            a = alpha_init
+
         while a >= alpha_min:
-            exp_red = -(a * dV1 + a * a * dV2)   # expected reduction (positive = descent)
-            if exp_red <= 0.0:
-                # quadratic model predicts non-descent at this alpha; backtrack
-                # (E(a) is concave with roots at 0 and -dV1/dV2, so smaller a
-                #  can recover E > 0)
-                a *= alpha_beta
-                continue
+            exp_red = -a * dV1                   # first-order expected reduction (> 0)
             X_try, U_try, J_try = forward_pass(x0, X, U, k_ff, K_fb, a, dyn)
             dJ_actual = float(J) - float(J_try)
             if dJ_actual >= c1 * exp_red:
@@ -304,7 +306,7 @@ def ilqr_solve(x0, U_init, dyn, ilqr_params):
         else:
             mu = min(mu * mu_factor, mu_max)
             print(f"[iLQR] iter {it:3d}: line search failed "
-                  f"(dV1={dV1:.2e}, dV2={dV2:.2e}), mu -> {mu:.2e}")
+                  f"(dV1={dV1:.2e}), mu -> {mu:.2e}")
             if mu >= mu_max:
                 print(f"[iLQR] mu hit mu_max={mu_max:.2e}; stopping.")
                 break
@@ -333,9 +335,9 @@ if __name__ == "__main__":
 
     # iLQR parameters
     ilqr_params = {
-        "T":         400,
-        "max_iter":  250,
-        "tol":       1e-3,
+        "T":         450,
+        "max_iter":  150,
+        "tol":       1e-2,
         "mu":        1.0,
         "mu_min":    1e-6,
         "mu_max":    1e10,
