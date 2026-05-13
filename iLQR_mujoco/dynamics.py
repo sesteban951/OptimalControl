@@ -1,4 +1,6 @@
+import os
 import mujoco  # type: ignore
+from mujoco import rollout  # type: ignore
 import numpy as np
 from dataclasses import dataclass
 
@@ -43,6 +45,18 @@ class MJDynamics:
             f"u_lb/u_ub must have shape ({self.nu},); "
             f"got {self.u_lb.shape} and {self.u_ub.shape}"
         )
+
+        # batched rollout pool for sampling-based linearization
+        # mjSTATE_FULLPHYSICS layout is [time, qpos, qvel, act, ...]; we only
+        # perturb qpos/qvel, so cache their slices once
+        self._full_state_spec = int(mujoco.mjtState.mjSTATE_FULLPHYSICS)
+        self._nstate          = mujoco.mj_stateSize(self.model, self._full_state_spec)
+        self._qpos_slice      = slice(1,            1 + self.nq)
+        self._qvel_slice      = slice(1 + self.nq,  1 + self.nq + self.nv)
+
+        self._nthread        = max(1, os.cpu_count() or 1)
+        self._rollout        = rollout.Rollout(nthread=self._nthread)
+        self._rollout_data   = [mujoco.MjData(self.model) for _ in range(self._nthread)]
 
     # convienience functions to get current state
     def get_state(self):
@@ -136,7 +150,7 @@ class MJDynamics:
             Ad: (nx, nx)
             Bd: (nx, nu)
         """
-        nx, nu = self.nx, self.nu
+        nx, nu, nq = self.nx, self.nu, self.nq
 
         # sampling knobs from ilqr_params
         K   = ilqr_params["sampling_K"]
@@ -150,12 +164,36 @@ class MJDynamics:
         xi  = rng.standard_normal((K, nx))
         eta = rng.standard_normal((K, nu))
 
-        # central directional derivative y_k ≈ [Ad | Bd] z_k
-        Y = np.empty((K, nx), dtype=np.float64)
-        for k in range(K):
-            f_p = self.f_disc(x + eps * xi[k], u + eps * eta[k], clip=False)
-            f_m = self.f_disc(x - eps * xi[k], u - eps * eta[k], clip=False)
-            Y[k] = (f_p - f_m) / (2.0 * eps)
+        # reference FULLPHYSICS state at the nominal (x, u); tiled into 2K rows
+        # for paired +/- central-difference rollouts
+        self.set_state(x)
+        ref_state = np.zeros(self._nstate, dtype=np.float64)
+        mujoco.mj_getState(self.model, self.data, ref_state, self._full_state_spec)
+        initial_state = np.tile(ref_state, (2 * K, 1))                     # (2K, nstate)
+
+        qs, vs = self._qpos_slice, self._qvel_slice
+        initial_state[:K, qs] += eps * xi[:, :nq]
+        initial_state[:K, vs] += eps * xi[:, nq:]
+        initial_state[K:, qs] -= eps * xi[:, :nq]
+        initial_state[K:, vs] -= eps * xi[:, nq:]
+
+        # one mj_step per rollout: control shape (nroll, nstep, nu)
+        u_arr   = np.asarray(u, dtype=np.float64)
+        control = np.empty((2 * K, 1, nu), dtype=np.float64)
+        control[:K, 0, :] = u_arr + eps * eta
+        control[K:, 0, :] = u_arr - eps * eta
+
+        # threaded batched rollouts (single step each)
+        state, _ = self._rollout.rollout(
+            self.model, self._rollout_data, initial_state, control, nstep=1
+        )                                                                  # (2K, 1, nstate)
+
+        # next [qpos; qvel] for each sample
+        final  = state[:, 0, :]                                            # (2K, nstate)
+        next_x = np.concatenate([final[:, qs], final[:, vs]], axis=1)      # (2K, nx)
+
+        # central-difference directional derivative y_k ≈ [Ad | Bd] z_k
+        Y = (next_x[:K] - next_x[K:]) / (2.0 * eps)                        # (K, nx)
 
         # stacked perturbation Z
         Z = np.concatenate((xi, eta), axis=1)             # (K, nx+nu)
